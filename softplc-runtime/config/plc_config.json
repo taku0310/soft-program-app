@@ -1,0 +1,20 @@
+{
+  "connections": [
+    {
+      "instance_id": "0x01",
+      "device_ip": "192.168.1.100",
+      "produced_data": { "size": 64, "type": "uint8_t[64]" },
+      "consumed_data": { "size": 64, "type": "uint8_t[64]" },
+      "rpi_ms": 10,
+      "connection_type": "exclusive",
+      "timeout_ms": 30
+    }
+  ],
+  "mqtt_publisher": {
+    "broker": "192.168.1.50:1883",
+    "topic_base": "softplc/devices",
+    "publish_interval_ms": 1000,
+    "payload_format": "json",
+    "max_size_bytes": 512
+  }
+}

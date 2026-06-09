@@ -1,0 +1,142 @@
+openapi: 3.0.3
+info:
+  title: Soft PLC Web Configuration API
+  version: 0.1.0
+  description: REST API for managing the Soft PLC runtime, EtherNet/IP connections, and MQTT configuration.
+servers:
+  - url: http://localhost:4000
+security:
+  - bearerAuth: []
+paths:
+  /health:
+    get:
+      summary: Health check
+      security: []
+      responses:
+        "200": { description: ok }
+  /api/plc/config:
+    get:
+      summary: Get PLC configuration
+      responses:
+        "200": { description: ok }
+    post:
+      summary: Update PLC configuration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PLCConfig" }
+      responses:
+        "200": { description: ok }
+  /api/plc/variables:
+    get:
+      summary: Get PLC variable snapshot
+      responses:
+        "200": { description: ok }
+  /api/plc/diagnostics:
+    get:
+      summary: Get scan cycle diagnostics
+      responses:
+        "200": { description: ok }
+  /api/plc/logs:
+    get:
+      summary: List runtime logs
+      parameters:
+        - in: query
+          name: severity
+          schema: { type: string, enum: [INFO, WARNING, ERROR] }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 1000 }
+      responses:
+        "200": { description: ok }
+  /api/ethernet-ip/devices:
+    get:
+      summary: List CIP connections
+      responses: { "200": { description: ok } }
+    post:
+      summary: Create CIP connection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CipConnection" }
+      responses: { "201": { description: created } }
+  /api/ethernet-ip/devices/{id}:
+    put:
+      summary: Update CIP connection
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CipConnection" }
+      responses: { "200": { description: ok } }
+    delete:
+      summary: Remove CIP connection
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses: { "204": { description: deleted } }
+  /api/ethernet-ip/test/{id}:
+    post:
+      summary: Test CIP connection
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses: { "200": { description: ok } }
+  /api/mqtt/config:
+    get:
+      summary: Get MQTT configuration
+      responses: { "200": { description: ok } }
+    post:
+      summary: Update MQTT configuration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MqttConfig" }
+      responses: { "200": { description: ok } }
+  /api/mqtt/topics:
+    get:
+      summary: List known MQTT topics
+      responses: { "200": { description: ok } }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    PLCConfig:
+      type: object
+      properties:
+        name: { type: string }
+        scanCycleMs: { type: integer, minimum: 1, maximum: 1000 }
+        mqttBroker: { type: string }
+        mqttTopicBase: { type: string }
+    CipConnection:
+      type: object
+      required: [instanceId, deviceIp, rpiMs]
+      properties:
+        instanceId: { type: string, pattern: "^0x[0-9a-fA-F]{1,4}$" }
+        deviceIp: { type: string, format: ipv4 }
+        rpiMs: { type: integer, minimum: 1, maximum: 1000 }
+        timeoutMs: { type: integer, minimum: 1, maximum: 1000 }
+        connectionType: { type: string, enum: [exclusive, input_only] }
+        producedSize: { type: integer }
+        consumedSize: { type: integer }
+        enabled: { type: boolean }
+    MqttConfig:
+      type: object
+      properties:
+        brokerUrl: { type: string }
+        topicBase: { type: string }

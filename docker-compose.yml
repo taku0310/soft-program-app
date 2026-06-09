@@ -1,0 +1,45 @@
+version: "3.9"
+
+services:
+  softplc-runtime:
+    build: ./softplc-runtime
+    container_name: softplc-runtime
+    privileged: true
+    cap_add:
+      - SYS_NICE
+      - IPC_LOCK
+    network_mode: host
+    volumes:
+      - ./softplc-runtime/config:/etc/softplc
+      - softplc-ipc:/dev/shm/softplc
+    restart: unless-stopped
+
+  softplc-backend:
+    build: ./softplc-webui-backend
+    container_name: softplc-backend
+    depends_on:
+      - softplc-runtime
+    ports:
+      - "4000:4000"
+    environment:
+      - NODE_ENV=production
+      - PORT=4000
+      - DB_PATH=/data/softplc.sqlite
+      - JWT_SECRET=${JWT_SECRET:-change-me}
+    volumes:
+      - softplc-data:/data
+      - softplc-ipc:/dev/shm/softplc
+    restart: unless-stopped
+
+  softplc-frontend:
+    build: ./softplc-webui-frontend
+    container_name: softplc-frontend
+    depends_on:
+      - softplc-backend
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+
+volumes:
+  softplc-data:
+  softplc-ipc:
