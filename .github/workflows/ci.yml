@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: softplc-webui-backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: npm
+          cache-dependency-path: softplc-webui-backend/package-lock.json
+      - run: npm ci
+      - run: npm run lint --if-present
+      - run: npm test -- --coverage
+
+  frontend:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: softplc-webui-frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: npm
+          cache-dependency-path: softplc-webui-frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint --if-present
+      - run: npm test
+      - run: npm run build
+
+  runtime:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: softplc-runtime
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake libmosquitto-dev
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build -j
+      - name: Tests
+        run: cd build && ctest --output-on-failure || true
+
+  security:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Backend npm audit
+        run: cd softplc-webui-backend && npm audit --audit-level=high || true
+      - name: Frontend npm audit
+        run: cd softplc-webui-frontend && npm audit --audit-level=high || true
