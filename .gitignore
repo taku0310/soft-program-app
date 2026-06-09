@@ -44,5 +44,8 @@ logs/
 coverage/
 .nyc_output/
 
+# TypeScript incremental build info
+*.tsbuildinfo
+
 # Docker
 .docker-data/
