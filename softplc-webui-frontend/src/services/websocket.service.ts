@@ -1,4 +1,4 @@
-export type WsMessageHandler = (event: MessageEvent) => void;
+export type WsMessageHandler = (_event: MessageEvent) => void;
 
 export function connectWebSocket(path = "/ws"): WebSocket {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
