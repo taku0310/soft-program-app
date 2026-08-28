@@ -177,5 +177,8 @@ the crash-containment behaviour comes with them.
   every one reports `point_override_capacity == 0`.
 * **No ST/IL/LD front end.** POUs are C against the runtime API. The runtime
   model is 61131-3; the language front end is a separate phase.
+* **Single cyclic task.** Programs run in one task at one period; a 61131-3
+  task configuration with several periods and priorities is not implemented.
+* **No RETAIN / PERSISTENT.** `%M` is plain RAM, lost on restart.
 * **Modbus/TCP and OPC UA adapters are not written.** The EtherNet/IP pair is
   intended as their template.

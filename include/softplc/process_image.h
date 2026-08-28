@@ -25,7 +25,10 @@ extern "C" {
 typedef enum plc_area {
     PLC_AREA_I = 0, /**< %I - inputs, written by the I/O map, read by POUs  */
     PLC_AREA_Q,     /**< %Q - outputs, written by POUs, read by the I/O map */
-    PLC_AREA_M,     /**< %M - retained markers, POU scratch                 */
+    /** %M - marker area, POU scratch.  NOT retained: this is plain RAM and
+     *  its contents are lost on restart.  IEC 61131-3 RETAIN/PERSISTENT
+     *  semantics would need backing storage, which is not implemented. */
+    PLC_AREA_M,
     PLC_AREA__COUNT
 } plc_area_t;
 
