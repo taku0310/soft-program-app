@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Two containers, one IPC namespace.
+#
+# The pair shares POSIX shared memory and named semaphores, both of which live
+# in /dev/shm.  Docker's `ipc:` setting governs SysV IPC, not this, so what
+# actually makes the sharing work is the named tmpfs volume mounted at /dev/shm
+# in both services.  Size it above sizeof(eip_shm_t) with room for the
+# semaphores; 16 MiB is generous for any realistic image size.
+#
+# Ordering is not enforced and does not need to be: whichever starts first
+# waits for the other, and the PLC simply scans on failsafe values until the
+# adapter attaches.
+
+name: softplc
+
+services:
+  plc-core:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.plc-core
+    environment:
+      SOFTPLC_INSTANCE: line1
+      SOFTPLC_ADAPTERS: ethernet-ip
+      SOFTPLC_CYCLE_US: "10000"
+      # hold | clear - see docs/adr/0005-failsafe-policy.md
+      SOFTPLC_FAILSAFE: hold
+      SOFTPLC_EIP_INPUT_BYTES: "32"
+      SOFTPLC_EIP_OUTPUT_BYTES: "32"
+      SOFTPLC_LOG_LEVEL: info
+    volumes:
+      - plc-ipc:/dev/shm
+    # The core owns the IPC objects, so restarting it invalidates the adapter's
+    # mapping; the adapter exits and is restarted in turn.
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  eip-adapter:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.eip-adapter
+    depends_on:
+      - plc-core
+    environment:
+      SOFTPLC_INSTANCE: line1
+      SOFTPLC_EIP_INTERFACE: eth0
+      SOFTPLC_LOG_LEVEL: info
+    volumes:
+      - plc-ipc:/dev/shm
+    ports:
+      - "44818:44818/tcp"
+      - "44818:44818/udp"
+      - "2222:2222/udp"
+    # This is the crash-containment story in one line: the adapter is the
+    # part expected to fail, and restarting it is the orchestrator's job, not
+    # the PLC core's.  The core needs no change when this happens.
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      # OpENer reads the interface MAC for the Ethernet Link object and binds
+      # the CIP sockets; it needs these two and nothing more.
+      - NET_RAW
+      - NET_ADMIN
+
+volumes:
+  plc-ipc:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=16m

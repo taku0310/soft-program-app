@@ -1,0 +1,53 @@
+# syntax=docker/dockerfile:1
+# SPDX-License-Identifier: Apache-2.0
+#
+# The PLC core.  Deliberately contains no protocol stack: the EtherNet/IP
+# adapter ships as its own image so a fault in it cannot reach this process.
+# Note there is no restart logic here either - if the adapter dies, this
+# container keeps scanning on failsafe values and the orchestrator decides
+# whether to bring the adapter back.
+
+FROM debian:bookworm-slim AS build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY CMakeLists.txt ./
+COPY cmake      ./cmake
+COPY include    ./include
+COPY src        ./src
+COPY examples   ./examples
+COPY tests      ./tests
+
+# The core image never links OpENer: the stack belongs to the adapter image.
+RUN cmake -S . -B build \
+        -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+        -DSOFTPLC_WITH_EIP=ON \
+        -DSOFTPLC_WITH_OPENER=OFF \
+        -DSOFTPLC_BUILD_TESTS=ON \
+    && cmake --build build -j"$(nproc)" \
+    && ctest --test-dir build --output-on-failure
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libstdc++6 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --no-create-home softplc
+
+COPY --from=build /src/build/softplc /usr/local/bin/softplc
+
+# The core creates the shared memory and semaphores, so it needs /dev/shm to be
+# the volume the adapter container also mounts - see docker-compose.yml.
+VOLUME ["/dev/shm"]
+
+USER 10001
+ENV SOFTPLC_INSTANCE=default \
+    SOFTPLC_ADAPTERS=loopback \
+    SOFTPLC_CYCLE_US=10000 \
+    SOFTPLC_FAILSAFE=hold \
+    SOFTPLC_LOG_LEVEL=info
+
+ENTRYPOINT ["/usr/local/bin/softplc"]
