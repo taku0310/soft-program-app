@@ -64,9 +64,17 @@ services:
       - ALL
     cap_add:
       # OpENer reads the interface MAC for the Ethernet Link object and binds
-      # the CIP sockets; it needs these two and nothing more.
+      # the CIP sockets; it needs these two.
       - NET_RAW
       - NET_ADMIN
+      # plc-core runs as uid 10001 and creates the shared memory and the two
+      # semaphores 0600, so they are readable only by that uid.  This container
+      # runs as root, but `cap_drop: ALL` takes CAP_DAC_OVERRIDE away with
+      # everything else, and without it the kernel applies ordinary DAC checks
+      # to uid 0 too - shm_open() would return EACCES and the adapter would
+      # never attach.  Grant it back rather than widening the IPC objects'
+      # permissions to every uid on the host's /dev/shm.
+      - DAC_OVERRIDE
 
 volumes:
   plc-ipc:

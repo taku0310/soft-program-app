@@ -41,7 +41,15 @@ void plc_sr_run(plc_sr_t *fb);
 /** On-delay: Q goes true PT after IN went true. */
 typedef struct plc_ton { PLC_BOOL IN, Q; PLC_TIME PT, ET; } plc_ton_t;
 /** Off-delay: Q stays true PT after IN went false. */
-typedef struct plc_tof { PLC_BOOL IN, Q; PLC_TIME PT, ET; PLC_BOOL m_prev; } plc_tof_t;
+typedef struct plc_tof {
+    PLC_BOOL IN, Q; PLC_TIME PT, ET;
+    PLC_BOOL m_prev;
+    /** The delay is only running between a falling edge of IN and ET reaching
+     *  PT.  Kept explicitly because ET alone cannot tell "never started" from
+     *  "started and not finished": a zero-initialised block has ET == 0 and
+     *  must report Q = FALSE, not "still timing out". */
+    PLC_BOOL m_running;
+} plc_tof_t;
 /** Pulse: a rising IN produces a PT-long pulse, not retriggerable. */
 typedef struct plc_tp  { PLC_BOOL IN, Q; PLC_TIME PT, ET; PLC_BOOL m_prev; } plc_tp_t;
 

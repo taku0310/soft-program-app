@@ -76,6 +76,12 @@ static uint8_t g_consumed_snapshot[PLC_IPC_MAX_FRAME_BYTES];
 static eip_backend_config_t g_cfg;
 static pthread_t            g_stack_thread;
 static int                  g_stack_running;
+/* Set once CipStackInit() has succeeded.  shutdown() must be callable after a
+ * failed init(), and ShutdownCipStack() is not safe on a stack that was never
+ * initialised: EncapsulationShutDown() walks g_registered_sessions[], which is
+ * only filled with kEipInvalidSocket (-1) by CipStackInit.  Before that it is
+ * still the zero-filled BSS, so every slot would be closed as descriptor 0. */
+static int                  g_stack_initialised;
 
 /* Written by OpENer's thread from CheckIoConnectionEvent(), read by the IPC
  * thread for status only - never for a control decision. */
@@ -274,6 +280,7 @@ static plc_status_t opener_init(const eip_backend_config_t *cfg) {
         PLC_LOG_ERR("CipStackInit failed");
         return PLC_ERR_IO;
     }
+    g_stack_initialised = 1;
 
     CipEthernetLinkSetMac(mac);
     GetHostName(&g_tcpip.hostname);
@@ -282,9 +289,14 @@ static plc_status_t opener_init(const eip_backend_config_t *cfg) {
         PLC_LOG_WARN("no stored NV data; starting from defaults");
     }
 
+    /* Both failure paths below tear the stack down here and then return, and
+     * the caller still calls shutdown() afterwards - so clear the flag with
+     * each one, or the second ShutdownCipStack() would free the assembly
+     * buffers a second time. */
     if (NetworkHandlerInitialize() != kEipStatusOk) {
         PLC_LOG_ERR("NetworkHandlerInitialize failed");
         ShutdownCipStack();
+        g_stack_initialised = 0;
         return PLC_ERR_IO;
     }
 
@@ -293,6 +305,7 @@ static plc_status_t opener_init(const eip_backend_config_t *cfg) {
         PLC_LOG_ERR("cannot start OpENer thread: %s", strerror(errno));
         NetworkHandlerFinish();
         ShutdownCipStack();
+        g_stack_initialised = 0;
         return PLC_ERR_IO;
     }
     g_stack_running = 1;
@@ -312,7 +325,10 @@ static void opener_shutdown(void) {
         g_stack_running = 0;
         NetworkHandlerFinish();
     }
-    ShutdownCipStack();
+    if (g_stack_initialised) {
+        ShutdownCipStack();
+        g_stack_initialised = 0;
+    }
 }
 
 static void opener_publish(const uint8_t *data, size_t len) {

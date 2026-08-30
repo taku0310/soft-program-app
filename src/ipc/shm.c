@@ -32,6 +32,7 @@ plc_status_t plc_shm_create(plc_shm_t *shm, const char *name, size_t size) {
     if (ftruncate(shm->fd, (off_t)size) != 0) {
         PLC_LOG_ERR("ftruncate(%s, %zu) failed: %s", name, size, strerror(errno));
         close(shm->fd);
+        shm->fd = -1;   /* the handle must not keep a descriptor it has closed */
         shm_unlink(name);
         return PLC_ERR_IO;
     }
@@ -41,6 +42,7 @@ plc_status_t plc_shm_create(plc_shm_t *shm, const char *name, size_t size) {
         PLC_LOG_ERR("mmap(%s) failed: %s", name, strerror(errno));
         shm->base = NULL;
         close(shm->fd);
+        shm->fd = -1;
         shm_unlink(name);
         return PLC_ERR_NOMEM;
     }
@@ -56,13 +58,24 @@ plc_status_t plc_shm_attach(plc_shm_t *shm, const char *name, size_t size) {
     memset(shm, 0, sizeof(*shm));
     snprintf(shm->name, sizeof(shm->name), "%s", name);
 
+    /* Attach is polled in a retry loop, so this must not log: at 200 ms a
+     * tick, a permanent failure such as EACCES would flood the log for the
+     * life of the container.  Distinguish the benign case in the status and
+     * leave errno intact for the caller to report once - nothing below the
+     * return touches it. */
     shm->fd = shm_open(name, O_RDWR, 0);
-    if (shm->fd < 0) return PLC_ERR_NOTFOUND;
+    if (shm->fd < 0) {
+        const int err = errno;
+        shm->fd = -1;
+        errno = err;
+        return (err == ENOENT) ? PLC_ERR_NOTFOUND : PLC_ERR_IO;
+    }
 
+    /* Silent for the same reason as the open above; PLC_ERR_PROTO is its own
+     * status so the caller can say what is wrong without consulting errno,
+     * which this path does not set. */
     struct stat st;
     if (fstat(shm->fd, &st) != 0 || (size_t)st.st_size < size) {
-        PLC_LOG_ERR("shm %s is %lld bytes, need %zu",
-                    name, (long long)st.st_size, size);
         close(shm->fd);
         shm->fd = -1;
         return PLC_ERR_PROTO;
@@ -103,10 +116,13 @@ plc_status_t plc_sem_create(sem_t **sem, const char *name) {
 
 plc_status_t plc_sem_attach(sem_t **sem, const char *name) {
     if (!sem || !name) return PLC_ERR_INVAL;
+    /* Silent and errno-preserving, for the same reason as plc_shm_attach(). */
     *sem = sem_open(name, 0);
     if (*sem == SEM_FAILED) {
+        const int err = errno;
         *sem = NULL;
-        return PLC_ERR_NOTFOUND;
+        errno = err;
+        return (err == ENOENT) ? PLC_ERR_NOTFOUND : PLC_ERR_IO;
     }
     return PLC_OK;
 }

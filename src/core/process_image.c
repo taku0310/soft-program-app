@@ -21,6 +21,10 @@ plc_status_t plc_pi_init(plc_process_image_t *pi,
                          size_t i_bytes, size_t q_bytes, size_t m_bytes) {
     if (!pi) return PLC_ERR_INVAL;
     memset(pi, 0, sizeof(*pi));
+    /* Claimed before the first allocation, not after the last: the failure
+     * path below hands the half-built image to plc_pi_free(), which only frees
+     * what it is told it owns. */
+    pi->owns_memory = 1;
 
     const size_t want[PLC_AREA__COUNT] = { i_bytes, q_bytes, m_bytes };
     for (int a = 0; a < PLC_AREA__COUNT; ++a) {
@@ -31,7 +35,6 @@ plc_status_t plc_pi_init(plc_process_image_t *pi,
         pi->area[a] = p;
         pi->size[a] = want[a];
     }
-    pi->owns_memory = 1;
     return PLC_OK;
 }
 

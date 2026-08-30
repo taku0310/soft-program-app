@@ -24,6 +24,7 @@
 #include "eip_backend.h"
 #include "eip_shm_layout.h"
 
+#include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -76,10 +77,37 @@ static plc_status_t attach(const char *instance, plc_shm_t *shm, eip_shm_t **map
     char name[EIP_SHM_NAME_MAX];
     eip_shm_name(name, sizeof(name), instance);
 
+    /* plc_shm_attach() logs the non-ENOENT failures, but this loop runs every
+     * 200 ms and the interesting ones - EACCES from a uid or capability
+     * mismatch - do not clear up on their own.  Report each distinct status
+     * once rather than five lines a second for the life of the container. */
+    plc_status_t reported = PLC_OK;
+
     for (;;) {
         if (g_stop) return PLC_ERR_STATE;
 
         plc_status_t st = plc_shm_attach(shm, name, sizeof(eip_shm_t));
+        if (st != PLC_OK && st != reported) {
+            switch (st) {
+                case PLC_ERR_NOTFOUND:
+                    PLC_LOG_INFO("waiting for the PLC core to publish %s", name);
+                    break;
+                case PLC_ERR_PROTO:
+                    /* Not errno-backed: the region exists but is too small for
+                     * this build's layout. */
+                    PLC_LOG_ERR("%s is smaller than the %zu byte layout this "
+                                "binary expects - core and adapter built from "
+                                "different headers?", name, sizeof(eip_shm_t));
+                    break;
+                default:
+                    PLC_LOG_ERR("cannot attach to %s: %s; still retrying "
+                                "(a uid or capability mismatch with the PLC "
+                                "core will not clear on its own)",
+                                name, strerror(errno));
+                    break;
+            }
+            reported = st;
+        }
         if (st == PLC_OK) {
             eip_shm_t *m = shm->base;
             if (m->magic == EIP_SHM_MAGIC &&
@@ -136,10 +164,15 @@ int main(int argc, char **argv) {
     eip_sem_req_name(req_name, sizeof(req_name), instance);
     eip_sem_rsp_name(rsp_name, sizeof(rsp_name), instance);
 
+    /* The core creates both doorbells before it publishes the magic word, so
+     * having attached above means they exist; anything failing here is a real
+     * error rather than a startup race, and is worth exiting on. */
     sem_t *sem_req = NULL, *sem_rsp = NULL;
     if (plc_sem_attach(&sem_req, req_name) != PLC_OK ||
         plc_sem_attach(&sem_rsp, rsp_name) != PLC_OK) {
-        PLC_LOG_ERR("cannot open doorbells for instance '%s'", instance);
+        PLC_LOG_ERR("cannot open the doorbells for instance '%s': %s",
+                    instance, strerror(errno));
+        plc_sem_close(sem_req, req_name, 0);
         plc_shm_close(&shm);
         return EXIT_FAILURE;
     }

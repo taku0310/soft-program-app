@@ -53,10 +53,24 @@ void plc_tof_run(plc_tof_t *fb, PLC_TIME dt) {
     if (fb->IN) {
         fb->ET = 0;
         fb->Q  = true;
+        fb->m_running = false;
     } else {
-        if (fb->m_prev) fb->ET = 0;   /* falling edge starts the delay */
-        fb->ET = accumulate(fb->ET, dt, fb->PT);
-        fb->Q  = (PLC_BOOL)(fb->ET < fb->PT);
+        if (fb->m_prev) {             /* falling edge starts the delay */
+            fb->ET = 0;
+            fb->m_running = true;
+        }
+        /* Only accumulate while the delay is actually running.  Deriving that
+         * from ET < PT instead would make a zero-initialised block - one whose
+         * IN has never been true - report Q for the first PT after start-up,
+         * which is not the IEC initial state and would energise a permissive
+         * on every restart. */
+        if (fb->m_running) {
+            fb->ET = accumulate(fb->ET, dt, fb->PT);
+            if (fb->ET >= fb->PT) {
+                fb->Q = false;
+                fb->m_running = false;
+            }
+        }
     }
     fb->m_prev = fb->IN;
 }

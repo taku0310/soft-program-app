@@ -33,7 +33,15 @@ typedef struct plc_shm {
  *  the same name: a leftover from a crashed run must not wedge a restart. */
 plc_status_t plc_shm_create(plc_shm_t *shm, const char *name, size_t size);
 
-/** Open an existing region and map it.  Fails if it is smaller than @p size. */
+/**
+ * @brief Open an existing region and map it.  Fails if it is smaller than
+ *        @p size.
+ *
+ * Does not log, and leaves @c errno set from the failing call: attach is
+ * normally polled, so reporting is the caller's to rate-limit.
+ * ::PLC_ERR_NOTFOUND means "not published yet" (ENOENT); ::PLC_ERR_IO is
+ * anything else, EACCES above all, which will not clear up on its own.
+ */
 plc_status_t plc_shm_attach(plc_shm_t *shm, const char *name, size_t size);
 
 /** Unmap, close, and unlink when this handle created the region. */
@@ -41,7 +49,8 @@ void plc_shm_close(plc_shm_t *shm);
 
 /** Create a named semaphore with value 0, replacing any stale one. */
 plc_status_t plc_sem_create(sem_t **sem, const char *name);
-/** Open an existing named semaphore. */
+/** Open an existing named semaphore.  Silent and errno-preserving, with the
+ *  same status split as plc_shm_attach(). */
 plc_status_t plc_sem_attach(sem_t **sem, const char *name);
 /** Close, and unlink when @p owner is non-zero. */
 void plc_sem_close(sem_t *sem, const char *name, int owner);

@@ -56,6 +56,12 @@ static void test_tof(void) {
     plc_tof_t t = { 0 };
     t.PT = PLC_TIME_MS(50);
 
+    /* A block whose IN has never been true has never started timing out, so Q
+     * must stay false however long the runtime scans.  Deriving "running" from
+     * ET < PT would report Q here for the first PT after start-up. */
+    for (int i = 0; i < 10; ++i) { plc_tof_run(&t, MS * 20); CHECK(!t.Q); }
+    CHECK_EQ_INT(t.ET, 0);
+
     t.IN = true;  plc_tof_run(&t, MS); CHECK(t.Q);
     t.IN = false;
     plc_tof_run(&t, MS * 20); CHECK(t.Q);   /* still held */

@@ -113,9 +113,6 @@ static plc_status_t proxy_open(plc_protocol_adapter_t *self,
     if (st != PLC_OK) return st;
     p->map = p->shm.base;
 
-    /* Publish the layout before the doorbells exist, so the adapter cannot
-     * observe a half-initialised region: it can only attach to the semaphores
-     * after this is all in place. */
     p->map->abi_version       = EIP_SHM_ABI_VERSION;
     p->map->layout_bytes      = (uint32_t)sizeof(eip_shm_t);
     p->map->output_bytes      = out;
@@ -127,14 +124,19 @@ static plc_status_t proxy_open(plc_protocol_adapter_t *self,
     plc_spsc_init(&p->map->req);
     plc_spsc_init(&p->map->rsp);
     atomic_store(&p->map->status.adapter_state, PLC_ADAPTER_CLOSED);
-    __atomic_thread_fence(__ATOMIC_RELEASE);
-    p->map->magic = EIP_SHM_MAGIC;   /* last: this is the attach gate */
 
+    /* The doorbells must exist before the magic word does.  The adapter treats
+     * magic as "everything is published" and goes straight from the attach
+     * check to sem_open(); a peer that attached in between would find the
+     * semaphores missing and exit, which is not a condition it retries. */
     if ((st = plc_sem_create(&p->sem_req, p->sem_req_name)) != PLC_OK ||
         (st = plc_sem_create(&p->sem_rsp, p->sem_rsp_name)) != PLC_OK) {
         proxy_teardown(p);
         return st;
     }
+
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    p->map->magic = EIP_SHM_MAGIC;   /* last: this is the attach gate */
 
     plc_adapter_caps_t *c = &p->caps;
     memset(c, 0, sizeof(*c));
@@ -239,7 +241,8 @@ static plc_status_t proxy_exchange(plc_protocol_adapter_t *self,
     /* Wait for *our* reply.  A reply that arrives while we hold a stale seq
      * is discarded and the wait continues on the remaining budget. */
     const uint32_t budget = p->caps.exchange_timeout_us;
-    for (;;) {
+    int matched = 0;
+    while (!matched) {
         const uint64_t spent = now_us() - t0;
         if (spent >= budget) return proxy_fail(p, in, in_len, PLC_ERR_TIMEOUT);
 
@@ -250,20 +253,29 @@ static plc_status_t proxy_exchange(plc_protocol_adapter_t *self,
             return proxy_fail(p, in, in_len, PLC_ERR_IO);
         }
 
-        st = plc_spsc_pop(&p->map->rsp, &p->scratch, PLC_IPC_MAX_FRAME_BYTES);
-        if (st == PLC_ERR_AGAIN) continue;          /* spurious post */
-        if (st != PLC_OK) {
-            p->stats.protocol_errors++;
-            return proxy_fail(p, in, in_len, PLC_ERR_PROTO);
+        /* Drain the ring rather than assuming one post per queued frame.  The
+         * two are resynchronised separately above, so a reply pushed between
+         * the ring drain and the doorbell drain leaves a stale frame whose
+         * post has already been consumed; waiting for a fresh post after
+         * discarding it would strand the reply we are actually waiting for and
+         * time out a scan the peer answered on time. */
+        for (;;) {
+            st = plc_spsc_pop(&p->map->rsp, &p->scratch, PLC_IPC_MAX_FRAME_BYTES);
+            if (st == PLC_ERR_AGAIN) break;         /* nothing left queued */
+            if (st != PLC_OK) {
+                p->stats.protocol_errors++;
+                return proxy_fail(p, in, in_len, PLC_ERR_PROTO);
+            }
+            /* Signed comparison over the modular counter, so this stays correct
+             * across the uint32_t wrap. */
+            if ((int32_t)(p->scratch.seq - seq) < 0) continue;  /* late, drop it */
+            if (p->scratch.seq != seq) {
+                p->stats.protocol_errors++;
+                return proxy_fail(p, in, in_len, PLC_ERR_PROTO);
+            }
+            matched = 1;
+            break;
         }
-        /* Signed comparison over the modular counter, so this stays correct
-         * across the uint32_t wrap. */
-        if ((int32_t)(p->scratch.seq - seq) < 0) continue;   /* late, drop it */
-        if (p->scratch.seq != seq) {
-            p->stats.protocol_errors++;
-            return proxy_fail(p, in, in_len, PLC_ERR_PROTO);
-        }
-        break;
     }
 
     /* A short reply is not an error: the adapter may have fewer bytes of
