@@ -5,13 +5,17 @@ protocol adapter layer. The first adapter ports **OpENer** (EIPStackGroup) to
 serve EtherNet/IP from its own process, so a fault in the fieldbus stack cannot
 reach PLC memory.
 
-> **EtherNet/IP role: Adapter (CIP target) only — not Scanner.**
-> OpENer is an adapter-side stack, so this soft PLC presents *itself* as a
-> device that an external scanner connects to and exchanges I/O with. It
-> **cannot originate connections**, so it cannot poll remote I/O drops, VFDs or
-> other adapters. If you need the PLC to be the one driving remote I/O, that is
-> Scanner (originator) functionality and it is not implemented — see
-> [ADR 0007](docs/adr/0007-opener-as-eip-stack.md#scanner-originator-role).
+Both EtherNet/IP roles are implemented, as two independent adapters that can
+run together:
+
+| role | stack | what it does | process |
+|---|---|---|---|
+| **Adapter** (CIP target) | OpENer | presents the PLC as a device an external scanner connects to | `softplc-eip-adapter` |
+| **Scanner** (originator) | EIPScanner | drives remote I/O drops and VFDs — the PLC opens the connections | `softplc-eip-scanner` |
+
+They are separate stacks because no single one does both: OpENer has no
+originator side at all. See [ADR 0007](docs/adr/0007-opener-as-eip-stack.md)
+and [ADR 0008](docs/adr/0008-scanner-aggregates-devices.md).
 
 ```
 ┌── plc-core container ──┐          ┌── eip-adapter container ──┐
@@ -35,21 +39,23 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-That builds **without** the OpENer stack — the EtherNet/IP adapter uses a
-mirror backend behind the same interface, so the whole tree compiles and the
-full suite passes on a machine with no submodule and no NIC. To link the real
-stack:
+That builds **without** either protocol stack — both EtherNet/IP adapters fall
+back to a mirror backend behind the same interface, so the whole tree compiles
+and the full suite passes on a machine with no submodules and no NIC. To link
+the real stacks:
 
 ```sh
 git submodule update --init --recursive
-cmake -S . -B build -DSOFTPLC_WITH_OPENER=ON
+cmake -S . -B build -DSOFTPLC_WITH_OPENER=ON -DSOFTPLC_WITH_EIPSCANNER=ON
 cmake --build build -j
 ```
 
 | option | default | effect |
 |---|---|---|
-| `SOFTPLC_WITH_EIP` | `ON` | build the EtherNet/IP adapter at all |
+| `SOFTPLC_WITH_EIP` | `ON` | build the EtherNet/IP **Adapter** (target) |
 | `SOFTPLC_WITH_OPENER` | `OFF` | link the real OpENer stack into it |
+| `SOFTPLC_WITH_EIP_SCANNER` | `ON` | build the EtherNet/IP **Scanner** (originator) |
+| `SOFTPLC_WITH_EIPSCANNER` | `OFF` | link the real EIPScanner stack into it |
 | `SOFTPLC_BUILD_TESTS` | `ON` | build the CTest suite |
 | `SOFTPLC_WERROR` | `OFF` | `-Werror` |
 
@@ -89,7 +95,7 @@ and there is no config file to mount.
 | `SOFTPLC_MAX_SCANS` | `0` | stop after N scans; `0` runs until signalled |
 | `SOFTPLC_LOG_LEVEL` | `info` | `error`, `warn`, `info`, `debug` |
 
-### EtherNet/IP adapter
+### EtherNet/IP Adapter (target role)
 
 | variable | default | meaning |
 |---|---|---|
@@ -101,6 +107,26 @@ and there is no config file to mount.
 | `SOFTPLC_EIP_CONFIG_ASSEMBLY` | `151` | configuration instance |
 | `SOFTPLC_EIP_EXCHANGE_TIMEOUT_US` | `5000` | per-exchange budget; also the liveness check |
 | `SOFTPLC_EIP_TIMEOUT_THRESHOLD` | `3` | consecutive misses before failsafe — **provisional**, see below |
+
+### EtherNet/IP Scanner (originator role)
+
+The per-device settings live in a device table rather than environment
+variables — see [`examples/config/scanner-devices.conf`](examples/config/scanner-devices.conf).
+Both the core and the scanner process read it, and the scanner refuses to start
+if the two disagree.
+
+| variable | default | meaning |
+|---|---|---|
+| `SOFTPLC_SCANNER_DEVICES` | `/etc/softplc/scanner-devices.conf` | path to the device table |
+| `SOFTPLC_SCANNER_EXCHANGE_TIMEOUT_US` | `5000` | per-exchange budget for the whole aggregate |
+| `SOFTPLC_SCANNER_TIMEOUT_THRESHOLD` | `3` | consecutive misses before the adapter-level failsafe |
+
+The scanner's input image is a **health block followed by the device data**:
+one byte per device (`0` offline, `1` online, `2` connection lost and
+failsafed), then each device's T→O slice in table order. Per-device failsafe is
+applied inside the scanner under that device's own policy, so one drive
+dropping does not disturb the others — a POU reads the health byte and decides
+what that means for the plant.
 
 ## Writing a program
 
@@ -129,13 +155,16 @@ Working:
 
 * IEC 61131-3 runtime — process image, cyclic scan with deadline pacing and
   overrun/jitter accounting, standard function blocks.
-* Protocol adapter interface, registry, and two implementations.
+* Protocol adapter interface, registry, and three implementations.
 * EtherNet/IP adapter: real OpENer integration (`CipStackInit`, assembly
   create/read/write, connection events, run/idle), shared-memory transport,
   sequence-matched exchange, timeout escalation, both failsafe policies.
+* EtherNet/IP Scanner: real EIPScanner integration (ForwardOpen per device,
+  Class 1 cyclic I/O, reconnect), four devices aggregated into one adapter,
+  per-device failsafe and a per-device health block in the input image.
 * Crash containment verified against a real `SIGKILL` of a real adapter
-  process, for both `HOLD` and `CLEAR`.
-* Two container images sharing one `/dev/shm` namespace.
+  process, for both `HOLD` and `CLEAR`; per-device loss verified separately.
+* Three container images sharing one `/dev/shm` namespace.
 
 Not done, and deliberately so:
 

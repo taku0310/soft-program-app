@@ -1,6 +1,14 @@
 # EtherNet/IP Scanner (originator) support — investigation
 
-*Status: findings, not a decision. Nothing here is implemented.*
+*Status: **implemented**. This was the investigation that preceded the work;
+the decisions it fed into are recorded in
+[ADR 0008](../adr/0008-scanner-aggregates-devices.md), and the code lives in
+`src/adapters/eip_scanner/`. Kept as written, because the reasoning behind a
+rejected option is worth as much as the chosen one.*
+
+*Outcome: EIPScanner was adopted, and **option B** (aggregate N devices into
+one adapter) was chosen over option A — see ADR 0008 for why the scan-time
+argument settled it even at four devices.*
 
 ## The gap
 

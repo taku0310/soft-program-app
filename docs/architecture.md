@@ -115,24 +115,42 @@ is what decides that.
 
 See [ADR 0005](adr/0005-failsafe-policy.md).
 
-## Direction mapping — and the role this does *not* play
+## Two EtherNet/IP roles, and the direction trap between them
 
-OpENer implements an EtherNet/IP **adapter** (a CIP target), so an external
-scanner owns the connection.
+Both roles are implemented, as independent adapters that can run together —
+necessarily on two stacks, since OpENer has no originator side and EIPScanner
+is originator-only.
 
-That is a scope limit worth stating plainly: **Scanner (originator) mode is not
-implemented.** This soft PLC is the device a scanner talks *to*; it cannot
-originate connections and therefore cannot drive remote I/O drops or VFDs
-itself. That is the opposite of what a line-controlling PLC usually does with
-EtherNet/IP, so it is a deliberate boundary, not an oversight — see
-[ADR 0007](adr/0007-opener-as-eip-stack.md#scanner-originator-role).
+**The CIP direction labels invert between them, while `%I`/`%Q` do not.** This
+is the single most likely source of a bug in this area, so it is stated in both
+layout headers and again here:
 
-The adapter role fixes the mapping, once, in `eip_shm_layout.h`:
-
-| PLC | ring | assembly | wire |
+| role | stack | PLC `%Q` goes out as | PLC `%I` comes in as |
 |---|---|---|---|
-| `%Q` outputs | `req` | produced | T→O |
-| `%I` inputs | `rsp` | consumed | O→T |
+| Adapter (CIP target) | OpENer | produced assembly, **T→O** | consumed assembly, **O→T** |
+| Scanner (originator) | EIPScanner | **O→T** | **T→O** |
+
+Both are "outputs out, inputs in" from the PLC's side; only the wire-direction
+names swap, because in one case we are the target and in the other the
+originator. Reasoning from one layout header while editing the other gets this
+backwards, and the result — outputs appearing on inputs — reaches machinery
+before it reaches a log.
+
+### The Scanner aggregates its devices
+
+One scanner process drives N remote devices, but the core sees **one** adapter
+with one image pair. The devices' slices are concatenated in device-table
+order, so the scan stays a single bounded `exchange()` however many devices
+there are — N sequential exchanges would make the worst-case scan N × the
+timeout, contradicting the once-per-scan rule above.
+
+The input image is a **health block followed by the data**: one byte per device
+(offline / online / failsafed), then the T→O slices. Per-device failsafe is
+applied inside the scanner under each device's own policy, so one drive
+dropping leaves the others untouched, and a POU reads the health byte as an
+ordinary input. Per-device health is *data*, not adapter state, because what to
+do when one drive drops is plant logic. See
+[ADR 0008](adr/0008-scanner-aggregates-devices.md).
 
 ## Layout
 
@@ -150,14 +168,31 @@ src/core/               61131-3 runtime; names no protocol
 src/adapters/
   builtins.c            the only file that knows which stacks exist
   loopback/             in-process reference adapter
-  eip/
+  eip/                  Adapter role (CIP target), on OpENer
     eip_shm_layout.h    the cross-process contract
     eip_adapter_proxy.c core side  — timeouts, failsafe, sequence matching
     eip_adapter_main.c  adapter side — the IPC service loop
     eip_backend.h       "an EtherNet/IP stack", abstracted
     eip_backend_opener.c   the real thing
     eip_backend_loopback.c mirror, for building without the submodule
+  eip_scanner/          Scanner role (originator), on EIPScanner
+    eip_scanner_config.h   the device table and its parser
+    eip_scanner_shm_layout.h  C-only: it holds the rings
+    eip_scanner_proxy.c    core side
+    eip_scanner_main.c     scanner side — C, so C++ never sees an _Atomic
+    eip_scanner_backend.h  "an originator stack", abstracted
+    eip_scanner_backend_eipscanner.cpp  the real thing (C++20)
+    eip_scanner_backend_mirror.cpp      mirror, with device-loss injection
 ```
+
+The scanner's language split is deliberate: EIPScanner is C++20, but the rings
+use C11 `_Atomic`, which C++ cannot portably include. Rather than rely on a
+layout-compatible shim, the service loop stays **C** and owns all shared
+memory; only the backend translation unit is C++, and
+`eip_scanner_shm_layout.h` enforces that with an `#error` on `__cplusplus`.
+The C++ dependency therefore never reaches the C11 core at all — the process
+split earning its keep a second time, for a dependency boundary rather than a
+fault boundary.
 
 `src/core/` has no link-time dependency on any protocol — deliberately. If it
 named `plc_eip_adapter_factory`, the pluggability claim would be false at the
@@ -188,7 +223,5 @@ the crash-containment behaviour comes with them.
 * **Single cyclic task.** Programs run in one task at one period; a 61131-3
   task configuration with several periods and priorities is not implemented.
 * **No RETAIN / PERSISTENT.** `%M` is plain RAM, lost on restart.
-* **EtherNet/IP Scanner (originator) mode is not implemented**, and cannot be
-  built on OpENer: it has no originator side. See ADR 0007.
-* **Modbus/TCP and OPC UA adapters are not written.** The EtherNet/IP pair is
-  intended as their template.
+* **Modbus/TCP and OPC UA adapters are not written.** The two EtherNet/IP
+  pairs are intended as their template.

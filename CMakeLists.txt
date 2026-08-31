@@ -6,15 +6,21 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)   # POSIX shm/sem and clock_nanosleep
 
-option(SOFTPLC_WITH_EIP     "Build the EtherNet/IP protocol adapter" ON)
+option(SOFTPLC_WITH_EIP     "Build the EtherNet/IP Adapter (target) protocol adapter" ON)
 option(SOFTPLC_WITH_OPENER  "Link the real OpENer stack into the EtherNet/IP adapter" OFF)
+option(SOFTPLC_WITH_EIP_SCANNER "Build the EtherNet/IP Scanner (originator) adapter" ON)
+option(SOFTPLC_WITH_EIPSCANNER  "Link the real EIPScanner stack into the Scanner adapter" OFF)
 option(SOFTPLC_BUILD_TESTS  "Build the test suite" ON)
 option(SOFTPLC_WERROR       "Treat warnings as errors" OFF)
 
 add_compile_options(
   -Wall -Wextra -Wpedantic
-  -Wshadow -Wcast-qual -Wmissing-prototypes -Wstrict-prototypes
+  -Wshadow -Wcast-qual
   -Wvla -Wpointer-arith
+  # Prototype warnings are C-only; applying them to the scanner's C++ backend
+  # would just emit "not valid for C++" on every compile.
+  $<$<COMPILE_LANGUAGE:C>:-Wmissing-prototypes>
+  $<$<COMPILE_LANGUAGE:C>:-Wstrict-prototypes>
 )
 if(SOFTPLC_WERROR)
   add_compile_options(-Werror)
@@ -47,6 +53,7 @@ target_include_directories(softplc_core PUBLIC
 target_link_libraries(softplc_core PUBLIC Threads::Threads rt)
 target_compile_definitions(softplc_core PUBLIC
   SOFTPLC_WITH_EIP=$<BOOL:${SOFTPLC_WITH_EIP}>
+  SOFTPLC_WITH_EIP_SCANNER=$<BOOL:${SOFTPLC_WITH_EIP_SCANNER}>
 )
 
 # --------------------------------------------------------------------------
@@ -70,6 +77,17 @@ if(SOFTPLC_WITH_EIP)
   )
   target_include_directories(softplc_adapters PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/adapters/eip
+  )
+endif()
+
+if(SOFTPLC_WITH_EIP_SCANNER)
+  target_sources(softplc_adapters PRIVATE
+    src/adapters/eip_scanner/eip_scanner_proxy.c
+    src/adapters/eip_scanner/eip_scanner_names.c
+    src/adapters/eip_scanner/eip_scanner_config.c
+  )
+  target_include_directories(softplc_adapters PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/adapters/eip_scanner
   )
 endif()
 
@@ -122,6 +140,46 @@ if(SOFTPLC_WITH_EIP)
 endif()
 
 # --------------------------------------------------------------------------
+# EtherNet/IP Scanner process
+#
+# Its service loop is C, not C++, even though the stack is C++20: that file
+# owns the _Atomic rings, and keeping it in C means the two languages never
+# have to agree on an atomic's layout. Only the backend TU is C++.
+# --------------------------------------------------------------------------
+if(SOFTPLC_WITH_EIP_SCANNER)
+  enable_language(CXX)
+  set(CMAKE_CXX_STANDARD 20)
+  set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+  if(SOFTPLC_WITH_EIPSCANNER)
+    include(cmake/EIPScanner.cmake)
+    set(SCANNER_BACKEND_SRC src/adapters/eip_scanner/eip_scanner_backend_eipscanner.cpp)
+  else()
+    set(SCANNER_BACKEND_SRC src/adapters/eip_scanner/eip_scanner_backend_mirror.cpp)
+  endif()
+
+  add_executable(softplc-eip-scanner
+    src/adapters/eip_scanner/eip_scanner_main.c
+    src/adapters/eip_scanner/eip_scanner_names.c
+    src/adapters/eip_scanner/eip_scanner_config.c
+    ${SCANNER_BACKEND_SRC}
+  )
+  target_include_directories(softplc-eip-scanner PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/adapters/eip_scanner
+  )
+  target_link_libraries(softplc-eip-scanner PRIVATE softplc_core)
+
+  if(SOFTPLC_WITH_EIPSCANNER)
+    target_link_libraries(softplc-eip-scanner PRIVATE EIPScannerS)
+    target_compile_definitions(softplc-eip-scanner PRIVATE SOFTPLC_WITH_EIPSCANNER=1)
+    # The backend includes upstream headers; relax only what they trip, and
+    # only for that file.
+    set_source_files_properties(${SCANNER_BACKEND_SRC}
+      PROPERTIES COMPILE_OPTIONS "-Wno-shadow;-Wno-cast-qual")
+  endif()
+endif()
+
+# --------------------------------------------------------------------------
 if(SOFTPLC_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
@@ -130,4 +188,6 @@ endif()
 message(STATUS "soft-program-app ${PROJECT_VERSION}")
 message(STATUS "  EtherNet/IP adapter : ${SOFTPLC_WITH_EIP}")
 message(STATUS "  OpENer stack linked : ${SOFTPLC_WITH_OPENER}")
+message(STATUS "  EtherNet/IP scanner : ${SOFTPLC_WITH_EIP_SCANNER}")
+message(STATUS "  EIPScanner linked   : ${SOFTPLC_WITH_EIPSCANNER}")
 message(STATUS "  tests               : ${SOFTPLC_BUILD_TESTS}")

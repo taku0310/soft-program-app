@@ -52,7 +52,12 @@ extern "C" {
 #define PLC_ADAPTER_ABI_VERSION 1u
 
 #define PLC_ADAPTER_NAME_MAX     32
-#define PLC_ADAPTER_PROTOCOL_MAX 16
+/* Wide enough for the longest protocol identifier in use plus room: 16 could
+ * not hold "ethernet-ip-scanner", and truncating a protocol name would make
+ * two adapters indistinguishable in the registry. Widened while ABI version 1
+ * is still unreleased, so no bump is warranted - there is no compiled adapter
+ * anywhere that was built against the narrower field. */
+#define PLC_ADAPTER_PROTOCOL_MAX 32
 
 /**
  * @brief What the core does with the input image when the peer stops answering.

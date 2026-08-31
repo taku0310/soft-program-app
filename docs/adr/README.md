@@ -12,3 +12,4 @@ and — as importantly — what each one rules out.
 | [0005](0005-failsafe-policy.md) | Failsafe selectable per adapter: HOLD or CLEAR | accepted |
 | [0006](0006-point-overrides-reserved.md) | `point_overrides`: type reserved, unimplemented | accepted |
 | [0007](0007-opener-as-eip-stack.md) | OpENer as the EtherNet/IP stack, vendored as a submodule | accepted |
+| [0008](0008-scanner-aggregates-devices.md) | The Scanner aggregates its devices into one adapter | accepted |

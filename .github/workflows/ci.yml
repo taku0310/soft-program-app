@@ -36,6 +36,8 @@ jobs:
   # The configuration that actually links OpENer. Kept separate because it
   # needs the submodule, and because a submodule fetch failure should not be
   # able to hide a real failure in the job above.
+  # Both real stacks linked: OpENer for the Adapter role, EIPScanner for the
+  # Scanner role. Kept separate from the job above because it needs submodules.
   build-with-opener:
     runs-on: ubuntu-latest
     steps:
@@ -44,7 +46,11 @@ jobs:
           submodules: recursive
 
       - name: Configure
-        run: cmake -S . -B build -DSOFTPLC_WITH_OPENER=ON -DSOFTPLC_WERROR=ON
+        run: |
+          cmake -S . -B build \
+            -DSOFTPLC_WITH_OPENER=ON \
+            -DSOFTPLC_WITH_EIPSCANNER=ON \
+            -DSOFTPLC_WERROR=ON
 
       - name: Build
         run: cmake --build build -j"$(nproc)"
@@ -64,3 +70,6 @@ jobs:
 
       - name: Build the EtherNet/IP adapter image
         run: docker build -f docker/Dockerfile.eip-adapter -t softplc/eip-adapter:ci .
+
+      - name: Build the EtherNet/IP scanner image
+        run: docker build -f docker/Dockerfile.eip-scanner -t softplc/eip-scanner:ci .

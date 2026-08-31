@@ -18,10 +18,16 @@ extern const plc_adapter_factory_t plc_loopback_adapter_factory;
 #if SOFTPLC_WITH_EIP
 extern const plc_adapter_factory_t plc_eip_adapter_factory;
 #endif
+#if SOFTPLC_WITH_EIP_SCANNER
+extern const plc_adapter_factory_t plc_eip_scanner_adapter_factory;
+#endif
 
 void plc_adapter_register_builtins(void) {
     plc_adapter_registry_add(&plc_loopback_adapter_factory);
 #if SOFTPLC_WITH_EIP
     plc_adapter_registry_add(&plc_eip_adapter_factory);
+#endif
+#if SOFTPLC_WITH_EIP_SCANNER
+    plc_adapter_registry_add(&plc_eip_scanner_adapter_factory);
 #endif
 }
