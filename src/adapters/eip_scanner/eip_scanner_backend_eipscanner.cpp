@@ -28,6 +28,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "ConnectionManager.h"
@@ -210,7 +211,24 @@ void scanner_poll(uint32_t budget_us) {
         }
     }
 
-    g_cm->handleConnections(std::chrono::milliseconds(budget_us / 1000 + 1));
+    /* Only service when something is actually open.
+     *
+     * Two reasons, and the first is not optional. Upstream's
+     * BaseSocket::select() begins with *std::max_element(sockets...) and
+     * dereferences it unconditionally, so calling handleConnections() with an
+     * empty socket list is undefined behaviour - which is exactly the state
+     * this process is in whenever every device is unreachable.
+     *
+     * Second, it would spin. With nothing to select on there is no sleep in
+     * the loop, so this thread would take and release the mutex the IPC thread
+     * needs at full speed, burn a core, and on a small host starve exchanges
+     * past their budget. A scanner whose devices are all down must idle, not
+     * spin. */
+    if (g_cm->hasOpenConnections()) {
+        g_cm->handleConnections(std::chrono::milliseconds(budget_us / 1000 + 1));
+    } else {
+        std::this_thread::sleep_for(std::chrono::microseconds(budget_us));
+    }
 
     for (size_t i = 0; i < g_devices.size(); ++i) {
         if (!g_devices[i].connected) connect_device(i);
