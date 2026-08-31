@@ -44,6 +44,34 @@ OpENer's own callbacks (`BeforeAssemblyDataSend`, `AfterAssemblyDataReceived`)
 move data across under one mutex, at the moments the stack itself guarantees no
 transmit is in flight.
 
+## Scanner (originator) role
+
+OpENer is **adapter-only**, and this decision therefore also decides — by
+omission — that the soft PLC does not scan. That consequence is large enough to
+state on its own rather than leave implied by the direction mapping.
+
+Verified against the vendored source, not assumed:
+
+* upstream's own README opens with "OpENer is an EtherNet/IP stack for **I/O
+  adapter devices**";
+* `ForwardOpen()` and `LargeForwardOpen()` in `cipconnectionmanager.c` are
+  request *handlers* — they take the receiving `CipInstance` and build a reply
+  through `AssembleForwardOpenResponse()`. Nothing ever emits a ForwardOpen;
+* there is no outbound `connect()` anywhere in `source/src`. An originator has
+  to open TCP sessions to its adapters, so this alone settles it.
+
+So the soft PLC is the device a scanner connects *to*. It cannot poll remote
+I/O drops, VFDs or other adapters — which is the opposite of what a
+line-controlling PLC normally does over EtherNet/IP, and is the single biggest
+thing to weigh before adopting this stack.
+
+Adding it later is a **new adapter, not a flag**: an originator stack (a
+library such as EIPScanner, or a commercial one) behind a second
+`plc_adapter_factory_t`, most likely registered as `"ethernet-ip-scanner"`.
+The protocol adapter interface already accommodates it — a scanner's cyclic
+exchange has the same shape — so the work is confined to a new adapter pair
+plus its process, exactly as ADR 0001 intends. Nothing in `src/core/` changes.
+
 Finally, `SOFTPLC_WITH_OPENER` defaults **OFF**, with a mirror backend behind
 the same `eip_backend.h` interface. The tree builds and the full suite runs
 without the submodule checked out, which keeps CI and a fresh clone working;

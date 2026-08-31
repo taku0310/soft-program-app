@@ -5,6 +5,14 @@ protocol adapter layer. The first adapter ports **OpENer** (EIPStackGroup) to
 serve EtherNet/IP from its own process, so a fault in the fieldbus stack cannot
 reach PLC memory.
 
+> **EtherNet/IP role: Adapter (CIP target) only — not Scanner.**
+> OpENer is an adapter-side stack, so this soft PLC presents *itself* as a
+> device that an external scanner connects to and exchanges I/O with. It
+> **cannot originate connections**, so it cannot poll remote I/O drops, VFDs or
+> other adapters. If you need the PLC to be the one driving remote I/O, that is
+> Scanner (originator) functionality and it is not implemented — see
+> [ADR 0007](docs/adr/0007-opener-as-eip-stack.md#scanner-originator-role).
+
 ```
 ┌── plc-core container ──┐          ┌── eip-adapter container ──┐
 │  IEC 61131-3 runtime   │ 2× SPSC  │  OpENer / CIP             │

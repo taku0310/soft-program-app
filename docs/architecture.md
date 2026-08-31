@@ -115,11 +115,19 @@ is what decides that.
 
 See [ADR 0005](adr/0005-failsafe-policy.md).
 
-## Direction mapping
+## Direction mapping — and the role this does *not* play
 
 OpENer implements an EtherNet/IP **adapter** (a CIP target), so an external
-scanner owns the connection. That fixes the mapping, once, in
-`eip_shm_layout.h`:
+scanner owns the connection.
+
+That is a scope limit worth stating plainly: **Scanner (originator) mode is not
+implemented.** This soft PLC is the device a scanner talks *to*; it cannot
+originate connections and therefore cannot drive remote I/O drops or VFDs
+itself. That is the opposite of what a line-controlling PLC usually does with
+EtherNet/IP, so it is a deliberate boundary, not an oversight — see
+[ADR 0007](adr/0007-opener-as-eip-stack.md#scanner-originator-role).
+
+The adapter role fixes the mapping, once, in `eip_shm_layout.h`:
 
 | PLC | ring | assembly | wire |
 |---|---|---|---|
@@ -180,5 +188,7 @@ the crash-containment behaviour comes with them.
 * **Single cyclic task.** Programs run in one task at one period; a 61131-3
   task configuration with several periods and priorities is not implemented.
 * **No RETAIN / PERSISTENT.** `%M` is plain RAM, lost on restart.
+* **EtherNet/IP Scanner (originator) mode is not implemented**, and cannot be
+  built on OpENer: it has no originator side. See ADR 0007.
 * **Modbus/TCP and OPC UA adapters are not written.** The EtherNet/IP pair is
   intended as their template.
