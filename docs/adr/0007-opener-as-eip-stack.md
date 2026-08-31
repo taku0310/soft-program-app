@@ -71,6 +71,10 @@ library such as EIPScanner, or a commercial one) behind a second
 The protocol adapter interface already accommodates it — a scanner's cyclic
 exchange has the same shape — so the work is confined to a new adapter pair
 plus its process, exactly as ADR 0001 intends. Nothing in `src/core/` changes.
+That path is investigated in
+[docs/design/scanner-support.md](../design/scanner-support.md), including the
+one place it strains the interface: a scanner drives N devices but reports a
+single adapter state.
 
 Finally, `SOFTPLC_WITH_OPENER` defaults **OFF**, with a mirror backend behind
 the same `eip_backend.h` interface. The tree builds and the full suite runs
