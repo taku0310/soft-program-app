@@ -180,6 +180,16 @@ if(SOFTPLC_WITH_EIP_SCANNER)
 endif()
 
 # --------------------------------------------------------------------------
+# Phase 0 measurement harness. Not part of the shipped image; built with the
+# tests so it cannot rot.
+# --------------------------------------------------------------------------
+if(SOFTPLC_BUILD_TESTS AND SOFTPLC_WITH_EIP)
+  add_executable(bench_exchange tools/bench_exchange.c)
+  target_link_libraries(bench_exchange PRIVATE ${SOFTPLC_ADAPTERS_LINK})
+  add_dependencies(bench_exchange softplc-eip-adapter)
+endif()
+
+# --------------------------------------------------------------------------
 if(SOFTPLC_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
