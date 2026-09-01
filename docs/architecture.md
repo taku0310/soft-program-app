@@ -211,10 +211,11 @@ the crash-containment behaviour comes with them.
 
 ## Known gaps
 
-* **`consecutive_timeout_threshold` default is provisional.** 3 is a
-  placeholder, not a measurement. Phase 0 golden data needs to report the
-  observed round-trip distribution under load first. It is runtime-configurable
-  so tuning does not need a rebuild.
+* **The failsafe threshold is now measured, but on the wrong hardware.**
+  [ADR 0009](adr/0009-timeout-threshold-from-measurement.md) sets it from
+  20 000 real exchanges, which showed the old placeholder of 3 tripping
+  failsafe on a healthy system. The numbers describe a shared cloud host;
+  re-run `tools/bench_exchange.c` on the target before trusting them there.
 * **`point_overrides` is type-only.** The struct is fixed so the ABI will not
   have to change when forcing/simulation lands; no adapter implements it and
   every one reports `point_override_capacity == 0`.

@@ -61,23 +61,52 @@ extern "C" {
 #define EIP_DEFAULT_OUTPUT_BYTES  32
 
 /**
- * @brief Provisional default for the failsafe threshold.
+ * @brief Consecutive missed exchanges before failsafe.  Measured, not guessed.
  *
- * Consecutive missed exchanges before the core declares the adapter FAULTED
- * and applies the failsafe policy.  Three is a placeholder chosen so that a
- * single scheduling hiccup and one retry are absorbed while a dead peer is
- * still caught inside four cycles (40 ms at the default 10 ms task).
+ * This was 3 as a placeholder.  The Phase 0 run (tools/bench_exchange.c,
+ * 20 000 exchanges at a 10 ms period against the real two-process path with
+ * this budget) showed why that was wrong rather than merely unverified:
  *
- * It is NOT yet backed by measurement.  The Phase 0 golden-data run has to
- * report the observed distribution of exchange round-trip times under load
- * before this becomes a real number; until then it is deliberately
- * configurable at runtime (SOFTPLC_EIP_TIMEOUT_THRESHOLD) so that tuning does
- * not need a rebuild.
+ *     p50=170us  p99=328us  p99.9=687us  p99.99=4534us  max=23.3ms
+ *     timeouts=15/19985 (0.075%)  longest consecutive run = 3
+ *
+ * A run of **three** occurred on an idle machine with a perfectly healthy
+ * peer, from host scheduling alone.  A threshold of 3 therefore applied the
+ * failsafe policy to a working system - on a plant, outputs dropping to
+ * HOLD or CLEAR for no reason.
+ *
+ * Five is chosen over the observed three for margin, and the cost of that
+ * margin is small because of an asymmetry worth stating: *below* the
+ * threshold the behaviour is already HOLD, so raising it only extends how
+ * long a HOLD-configured adapter holds.  It matters materially only for
+ * CLEAR-configured adapters, where crossing the threshold zeroes a live
+ * image - exactly where a false trip is most damaging.
+ *
+ * Detection latency is threshold x cycle: 50 ms at the default 10 ms task,
+ * the same order as CIP's own 4x-RPI connection timeout multiplier.
+ *
+ * RE-MEASURE ON THE TARGET HARDWARE.  These numbers describe a shared cloud
+ * host.  A tuned or RT kernel would show a far shorter tail and justify a
+ * lower threshold; a busier or more oversubscribed host would need a higher
+ * one.  Run the harness rather than inheriting this number on faith.
+ * SOFTPLC_EIP_TIMEOUT_THRESHOLD overrides it without a rebuild.
  */
-#define EIP_DEFAULT_TIMEOUT_THRESHOLD  3u
+#define EIP_DEFAULT_TIMEOUT_THRESHOLD  5u
 
-/** Default per-exchange budget.  Half the default 10 ms task period, so a
- *  timing-out adapter still leaves the scan room to run its logic. */
+/**
+ * @brief Default per-exchange budget.
+ *
+ * Half the default 10 ms task period, so a timing-out adapter still leaves
+ * the scan room to run its logic.  The measurement supports keeping it there:
+ * p99.99 came in at 4534 us, just inside 5 ms, so this sits right at the knee
+ * of the distribution.  Widening it to swallow the 23 ms outliers would mean
+ * a timing-out adapter consuming most of the cycle, which is a worse trade
+ * than absorbing those outliers as held frames.
+ *
+ * A non-zero timeout count on a healthy system is therefore expected, not a
+ * fault: 0.075% of scans in the Phase 0 run, every one of them absorbed by
+ * holding the last good image.
+ */
 #define EIP_DEFAULT_EXCHANGE_TIMEOUT_US  5000u
 
 /** Adapter-side liveness/telemetry, published for observability only.

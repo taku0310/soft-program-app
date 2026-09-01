@@ -75,8 +75,14 @@
  */
 #define EIP_SCANNER_HEALTH_BYTES(device_count) ((uint32_t)(device_count))
 
+/* Same values and the same reasoning as the Adapter role - see the Phase 0
+ * measurement recorded against EIP_DEFAULT_TIMEOUT_THRESHOLD in
+ * eip_shm_layout.h.  The quantity measured there is the IPC round trip, which
+ * is identical for both roles: the aggregate exchange moves more bytes but
+ * over the same rings, and the wire is on the far side of the adapter
+ * process either way. */
 #define EIP_SCANNER_DEFAULT_EXCHANGE_TIMEOUT_US 5000u
-#define EIP_SCANNER_DEFAULT_TIMEOUT_THRESHOLD      3u
+#define EIP_SCANNER_DEFAULT_TIMEOUT_THRESHOLD      5u
 
 typedef struct eip_scanner_status {
     _Atomic uint32_t adapter_state;      /**< plc_adapter_state_t          */
