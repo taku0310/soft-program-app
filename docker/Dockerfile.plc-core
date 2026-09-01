@@ -20,6 +20,11 @@ COPY include    ./include
 COPY src        ./src
 COPY examples   ./examples
 COPY tests      ./tests
+# Built in this stage but never copied into the final image: the measurement
+# harness is a development tool. It is here because the build enables it
+# alongside the tests, and because compiling it with them is what stops it
+# rotting - the same reason the tests themselves run in this stage.
+COPY tools      ./tools
 
 # The core image never links OpENer: the stack belongs to the adapter image.
 RUN cmake -S . -B build \

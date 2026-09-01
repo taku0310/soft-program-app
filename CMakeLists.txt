@@ -182,6 +182,11 @@ endif()
 # --------------------------------------------------------------------------
 # Phase 0 measurement harness. Not part of the shipped image; built with the
 # tests so it cannot rot.
+#
+# NOTE: adding a new top-level source directory here means adding it to the
+# COPY list in every docker/Dockerfile.* that configures with the option
+# guarding it. Missing that fails the image build and nothing else, so it is
+# invisible until CI's `images` job runs.
 # --------------------------------------------------------------------------
 if(SOFTPLC_BUILD_TESTS AND SOFTPLC_WITH_EIP)
   add_executable(bench_exchange tools/bench_exchange.c)
