@@ -99,7 +99,7 @@ static plc_protocol_adapter_t *open_scanner(const plc_adapter_factory_t *f,
     cfg.endpoint = instance;
     cfg.failsafe_policy = PLC_FAILSAFE_HOLD;
     cfg.exchange_timeout_us = 200000;
-    cfg.consecutive_timeout_threshold = 3;
+    cfg.failsafe_timeout_us = 300000;
     CHECK_EQ_INT(plc_adapter_open(a, &cfg), PLC_OK);
     return a;
 }
@@ -238,15 +238,17 @@ static void test_process_loss(void) {
     waitpid(child, NULL, 0);
 
     const uint8_t held = in[HEALTH_BYTES];
-    for (int i = 0; i < 2; ++i) {
-        CHECK_EQ_INT(plc_adapter_exchange(a, out, sizeof(out), in, sizeof(in)),
-                     PLC_ERR_TIMEOUT);
-    }
-    CHECK_EQ_INT(plc_adapter_state(a), PLC_ADAPTER_DEGRADED);
-
     CHECK_EQ_INT(plc_adapter_exchange(a, out, sizeof(out), in, sizeof(in)),
                  PLC_ERR_TIMEOUT);
-    CHECK_EQ_INT(plc_adapter_state(a), PLC_ADAPTER_FAULTED);
+    CHECK_EQ_INT(plc_adapter_state(a), PLC_ADAPTER_DEGRADED);
+
+    int faulted = 0;
+    for (int i = 0; i < 10 && !faulted; ++i) {
+        CHECK_EQ_INT(plc_adapter_exchange(a, out, sizeof(out), in, sizeof(in)),
+                     PLC_ERR_TIMEOUT);
+        faulted = (plc_adapter_state(a) == PLC_ADAPTER_FAULTED);
+    }
+    CHECK(faulted);
     CHECK_EQ_INT(in[HEALTH_BYTES], held);   /* HOLD across the whole image */
 
     plc_adapter_stats_t s;

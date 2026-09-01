@@ -61,37 +61,34 @@ extern "C" {
 #define EIP_DEFAULT_OUTPUT_BYTES  32
 
 /**
- * @brief Consecutive missed exchanges before failsafe.  Measured, not guessed.
+ * @brief How long without a fresh image before the failsafe policy applies.
  *
- * This was 3 as a placeholder.  The Phase 0 run (tools/bench_exchange.c,
- * 20 000 exchanges at a 10 ms period against the real two-process path with
- * this budget) showed why that was wrong rather than merely unverified:
+ * A duration, not a count of missed exchanges. Five samples of 20 000
+ * exchanges each (tools/bench_exchange.c, 10 ms period, 5 ms budget) on this
+ * class of host:
  *
- *     p50=170us  p99=328us  p99.9=687us  p99.99=4534us  max=23.3ms
- *     timeouts=15/19985 (0.075%)  longest consecutive run = 3
+ *     longest consecutive run of timeouts: 3, 5, 2, 3, 2
+ *     worst single round trip:  23.3, 26.8, 29.4, 33.4, 11.6 ms
+ *     timeouts: 2 to 16 per 20 000 (0.01% to 0.08%)
  *
- * A run of **three** occurred on an idle machine with a perfectly healthy
- * peer, from host scheduling alone.  A threshold of 3 therefore applied the
- * failsafe policy to a working system - on a plant, outputs dropping to
- * HOLD or CLEAR for no reason.
+ * A run of five at a 10 ms period is ~50 ms with no fresh data, from host
+ * scheduling alone, with a perfectly healthy peer. Two successive count-based
+ * thresholds were set from an observed maximum and both were beaten by the
+ * next sample - which is the point: timeouts are not independent. A stall
+ * withholds data for tens of milliseconds and takes out every scan inside it,
+ * so the run length is really stall/cycle and chasing the observed maximum
+ * never converges.
  *
- * Five is chosen over the observed three for margin, and the cost of that
- * margin is small because of an asymmetry worth stating: *below* the
- * threshold the behaviour is already HOLD, so raising it only extends how
- * long a HOLD-configured adapter holds.  It matters materially only for
- * CLEAR-configured adapters, where crossing the threshold zeroes a live
- * image - exactly where a false trip is most damaging.
+ * 100 ms is twice the worst disruption seen across 100 000 exchanges. Being a
+ * duration it also stops meaning something different when the task period
+ * changes, which a count silently did.
  *
- * Detection latency is threshold x cycle: 50 ms at the default 10 ms task,
- * the same order as CIP's own 4x-RPI connection timeout multiplier.
- *
- * RE-MEASURE ON THE TARGET HARDWARE.  These numbers describe a shared cloud
- * host.  A tuned or RT kernel would show a far shorter tail and justify a
- * lower threshold; a busier or more oversubscribed host would need a higher
- * one.  Run the harness rather than inheriting this number on faith.
- * SOFTPLC_EIP_TIMEOUT_THRESHOLD overrides it without a rebuild.
+ * RE-MEASURE ON THE TARGET HARDWARE. This describes a shared cloud host; a
+ * PREEMPT_RT kernel would show a far shorter tail and justify a much lower
+ * value, which is worth having because this is detection latency for a dead
+ * peer. SOFTPLC_EIP_FAILSAFE_TIMEOUT_US overrides it without a rebuild.
  */
-#define EIP_DEFAULT_TIMEOUT_THRESHOLD  5u
+#define EIP_DEFAULT_FAILSAFE_TIMEOUT_US  100000u
 
 /**
  * @brief Default per-exchange budget.

@@ -3,9 +3,9 @@
  * @file bench_exchange.c
  * @brief Phase 0 golden data: what does one cyclic exchange actually cost?
  *
- * `consecutive_timeout_threshold` and `exchange_timeout_us` shipped as
- * placeholders. This measures the thing they guard so they can be set from
- * data instead.
+ * The failsafe trigger and `exchange_timeout_us` shipped as placeholders. This
+ * measures the thing they guard so they can be set from data instead - and it
+ * is what showed the trigger itself to be the wrong shape (ADR 0009).
  *
  * What it measures: the **round trip of the IPC path** - core pushes a frame,
  * posts the doorbell, the adapter process wakes, swaps images and replies,
@@ -93,7 +93,9 @@ int main(int argc, char **argv) {
      * distribution; set it to a candidate value to see what that value would
      * actually reject, and how many rejections land back to back. */
     cfg.exchange_timeout_us = (uint32_t)budget_us;
-    cfg.consecutive_timeout_threshold = 1000000;
+    /* Effectively disabled: the harness measures the distribution, and letting
+     * it apply failsafe mid-run would change what it is measuring. */
+    cfg.failsafe_timeout_us = 3600000000u;
     if (plc_adapter_open(a, &cfg) != PLC_OK) {
         fprintf(stderr, "open failed\n");
         return EXIT_FAILURE;

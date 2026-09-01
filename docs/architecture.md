@@ -107,11 +107,11 @@ everywhere:
 * `PLC_FAILSAFE_HOLD` — keep the last good image.
 * `PLC_FAILSAFE_CLEAR` — zero it.
 
-One rule applies under both: **below the threshold, always hold.** A single
-missed frame is a transport hiccup, and zeroing the image for one scan would
-inject a falling edge on every input that a POU would read as a real event.
-`CLEAR` is about a peer that is *gone*, and the consecutive-timeout threshold
-is what decides that.
+One rule applies under both: **inside the failsafe window, always hold.** A
+single missed frame is a transport hiccup, and zeroing the image for one scan
+would inject a falling edge on every input that a POU would read as a real
+event. `CLEAR` is about a peer that is *gone*, and `failsafe_timeout_us` — a
+duration, not a count of misses — is what decides that.
 
 See [ADR 0005](adr/0005-failsafe-policy.md).
 
@@ -211,11 +211,12 @@ the crash-containment behaviour comes with them.
 
 ## Known gaps
 
-* **The failsafe threshold is now measured, but on the wrong hardware.**
+* **The failsafe timeout is measured, but on the wrong hardware.**
   [ADR 0009](adr/0009-timeout-threshold-from-measurement.md) sets it from
-  20 000 real exchanges, which showed the old placeholder of 3 tripping
-  failsafe on a healthy system. The numbers describe a shared cloud host;
-  re-run `tools/bench_exchange.c` on the target before trusting them there.
+  100 000 real exchanges, which showed two successive count-based thresholds
+  tripping failsafe on a healthy system and led to replacing the count with a
+  duration. The numbers describe a shared cloud host; re-run
+  `tools/bench_exchange.c` several times on the target before trusting it.
 * **`point_overrides` is type-only.** The struct is fixed so the ABI will not
   have to change when forcing/simulation lands; no adapter implements it and
   every one reports `point_override_capacity == 0`.

@@ -1,4 +1,4 @@
-# 0009 — The failsafe threshold, set from measurement
+# 0009 — The failsafe trigger, set from measurement — and changed from a count to a duration
 
 *Status: accepted*
 
@@ -23,11 +23,16 @@ That last figure is the one the threshold rests on. An isolated miss is
 absorbed by holding; only a run should reach failsafe. Measuring the mean, or
 even p99.9, would not have answered the question.
 
-20 000 exchanges at a 10 ms period, with the shipped 5 ms budget:
+Five samples of 20 000 exchanges each — 100 000 in total — at a 10 ms period
+with the shipped 5 ms budget:
 
-| | p50 | p99 | p99.9 | p99.99 | max | timeouts | **longest run** |
-|---|---|---|---|---|---|---|---|
-| idle, 10 ms | 170 µs | 328 µs | 687 µs | 4534 µs | 23.3 ms | 15 / 19 985 | **3** |
+| sample | p50 | p99 | p99.9 | worst RTT | timeouts | **longest run** |
+|---|---|---|---|---|---|---|
+| A | 170 µs | 328 µs | 687 µs | 23.3 ms | 15 | **3** |
+| B | 149 µs | 301 µs | 675 µs | 26.8 ms | 16 | **5** |
+| C | 155 µs | 330 µs | 520 µs | 29.4 ms | 2 | 2 |
+| D | 159 µs | 321 µs | 659 µs | 33.4 ms | 6 | 3 |
+| E | 152 µs | 289 µs | 477 µs | 11.6 ms | 9 | 2 |
 
 Supporting runs:
 
@@ -38,29 +43,58 @@ Supporting runs:
 
 ## Decision
 
-**Threshold 3 → 5.** Budget stays at 5000 µs.
+**Replace the count with a duration.** `consecutive_timeout_threshold`
+becomes `failsafe_timeout_us`, defaulting to **100 ms**. Budget stays at
+5000 µs.
 
 ## Consequences
 
-The measurement did not confirm the placeholder; it showed it was **wrong**. A
-run of three consecutive timeouts occurred on an idle machine with a perfectly
-healthy peer, from host scheduling alone. A threshold of 3 therefore applied
-the failsafe policy to a working system — on a plant, outputs dropping to HOLD
-or CLEAR for no reason at all. This was not a value that merely lacked
-evidence; it sat exactly on the environmental limit.
+The measurement did not confirm the placeholder; it showed it was **wrong**,
+and then it showed the replacement was wrong too.
 
-Five buys margin over the observed three, and the margin is cheap because of
-an asymmetry worth stating plainly: **below the threshold the behaviour is
-already HOLD.** Raising it only extends how long a HOLD-configured adapter
-holds — no behavioural change at all. It matters materially only for
-CLEAR-configured adapters, where crossing the threshold zeroes a live image,
-which is precisely where a false trip does the most damage. The trade is
-therefore heavily one-sided in favour of the higher number.
+Sample A produced a run of three consecutive timeouts — on an idle machine,
+with a perfectly healthy peer, from host scheduling alone. The shipped
+threshold was three, so the default applied the failsafe policy to a working
+system. It was raised to five. Sample B then produced a run of **five**.
 
-Detection latency is `threshold × cycle` — 50 ms at the default 10 ms task.
-That is the same order as CIP's own connection timeout multiplier, whose
-minimum is 4 × RPI, so the runtime is not slower to notice a dead peer than
-the protocol underneath it.
+Two thresholds, both chosen from an observed maximum, both beaten by the next
+sample. That is not bad luck; it is the method being wrong. **Timeouts are not
+independent.** At a 0.08 % timeout rate, five in a row would have probability
+≈ 3 × 10⁻¹⁶ if they were — it would never be seen. What actually happens is
+that a host stall withholds data for tens of milliseconds and takes out every
+scan inside it, so the run length is really `stall / cycle`. Chasing the
+observed maximum of a heavy-tailed quantity does not converge.
+
+So the count is the wrong shape. Two things follow from switching to a
+duration:
+
+* **It is the quantity anyone actually reasons about.** "Declare the peer gone
+  after 100 ms without data" is a statement about the plant. "After 5 misses"
+  is a statement about an implementation detail.
+* **It stops silently changing meaning.** The same count of 5 tolerates 50 ms
+  at a 10 ms cycle and 5 ms at 1 ms, so retuning the scan rate quietly retuned
+  the failsafe behaviour with it — a latent trap for whoever changes
+  `SOFTPLC_CYCLE_US` next. This is also what CIP itself does: its connection
+  timeout is a multiplier on RPI, i.e. a time.
+
+It is also less state, not more: one timestamp instead of a counter, and the
+same helper (`plc_staleness_*`) shared by all three adapters so HOLD and CLEAR
+cannot come to mean subtly different things per protocol.
+
+**100 ms** is twice the worst disruption observed across 100 000 exchanges
+(a run of 5 at a 10 ms period ≈ 50 ms). The margin is cheap because of an
+asymmetry worth stating: **inside the window the behaviour is already HOLD.**
+Widening it only extends how long a HOLD-configured adapter holds — no
+behavioural change at all. It matters materially only for CLEAR-configured
+adapters, where crossing it zeroes a live image, which is exactly where a
+false trip does the most damage.
+
+One thing this makes uncomfortable but honest: CIP's own minimum connection
+timeout is 4 × RPI, which at a 10 ms RPI is 40 ms — **less than the 50 ms
+disruption this host produces**. A real scanner talking to this machine would
+drop its connections. That is a statement about the host, not the code, and it
+is the clearest available evidence that a general-purpose cloud VM is not a
+platform for hard 10 ms control.
 
 The budget stays where it was, and the measurement is what justifies it: p99.99
 landed at 4534 µs, just inside 5 ms, so the budget sits at the knee of the
@@ -69,9 +103,10 @@ timing-out adapter consuming most of the cycle — a worse trade than absorbing
 those outliers as held frames.
 
 **A non-zero timeout count on a healthy system is expected, not a fault.**
-0.075 % of scans in this run, every one absorbed by holding. Anyone reading
-`plc_adapter_stats::timeouts` should compare it against that baseline rather
-than against zero.
+Between 0.01 % and 0.08 % of scans across the five samples, every one absorbed
+by holding. Anyone reading `plc_adapter_stats::timeouts` should compare it
+against that baseline rather than against zero — `stale_for_us` is the field
+that actually tracks the failsafe decision.
 
 One counter-intuitive result is worth carrying forward: **load was ~19× faster
 than idle at the median** (8 µs against 170 µs). Idle pays wake-from-idle
@@ -91,5 +126,10 @@ cmake --build build --target bench_exchange
 ./build/bench_exchange ./build/softplc-eip-adapter 20000 10000 5000 target
 ```
 
-`SOFTPLC_EIP_TIMEOUT_THRESHOLD` and `SOFTPLC_SCANNER_TIMEOUT_THRESHOLD`
+Run it **several times**. One sample would have justified a threshold of 3
+here, and a second sample proved that wrong. `max_run × cycle_us` is the
+disruption to size the timeout against, and it varies enough between samples
+that a single run does not characterise it.
+
+`SOFTPLC_EIP_FAILSAFE_TIMEOUT_US` and `SOFTPLC_SCANNER_FAILSAFE_TIMEOUT_US`
 override the defaults without a rebuild, so re-tuning is a deployment change.

@@ -33,9 +33,8 @@ Consequences:
   path, one place where failsafe is applied.
 * A slow peer and a dead peer are handled identically. That is intended, not a
   limitation.
-* Detection latency is bounded by
-  `exchange_timeout_us × consecutive_timeout_threshold` — 20 ms at the current
-  provisional defaults.
+* Detection latency is bounded by `failsafe_timeout_us` — 100 ms at the
+  measured defaults ([ADR 0009](0009-timeout-threshold-from-measurement.md)).
 * The adapter *does* publish `eip_adapter_status_t` into shared memory, but it
   is observability only. A dead process cannot update it, which is precisely
   why it must never be used for a control decision.

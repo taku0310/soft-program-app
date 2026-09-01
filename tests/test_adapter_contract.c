@@ -12,6 +12,8 @@
 #include "softplc/protocol_adapter.h"
 #include "test_util.h"
 
+#include <time.h>
+
 void plc_loopback_force_timeouts(plc_protocol_adapter_t *a, unsigned n);
 
 static void contract_lifecycle(const plc_adapter_factory_t *f) {
@@ -42,7 +44,7 @@ static void contract_lifecycle(const plc_adapter_factory_t *f) {
     CHECK(caps.name[0] != '\0');
     CHECK(caps.protocol[0] != '\0');
     CHECK(caps.exchange_timeout_us > 0);
-    CHECK(caps.consecutive_timeout_threshold > 0);
+    CHECK(caps.failsafe_timeout_us > 0);
     /* point_overrides is reserved in this release; an adapter claiming
      * capacity would be claiming behaviour that does not exist yet. */
     CHECK_EQ_INT(caps.point_override_capacity, 0);
@@ -52,6 +54,7 @@ static void contract_lifecycle(const plc_adapter_factory_t *f) {
     CHECK_EQ_INT(plc_adapter_get_stats(a, &stats), PLC_OK);
     CHECK_EQ_INT(stats.exchanges, 0);
     CHECK_EQ_INT(stats.timeouts, 0);
+    CHECK_EQ_INT(stats.stale_for_us, 0);
 
     /* Oversized requests are rejected, not truncated. */
     uint8_t big[64] = { 0 };
@@ -66,7 +69,21 @@ static void contract_lifecycle(const plc_adapter_factory_t *f) {
 }
 
 /* The central guarantee: however the peer misbehaves, exchange() writes the
- * whole input image before returning. */
+ * whole input image before returning - holding until the image has been stale
+ * for failsafe_timeout_us, and only then applying the configured policy.
+ *
+ * The window is set to 3 ms and the misses are spaced 2 ms apart so the test
+ * crosses it in real time. It is a duration now, so there is no count to step
+ * through: what matters is that a miss inside the window holds regardless of
+ * policy, and one past it does not. */
+#define FAILSAFE_WINDOW_US 3000
+#define MISS_SPACING_US    2000
+
+static void sleep_us_(unsigned us) {
+    struct timespec ts = { .tv_sec = 0, .tv_nsec = (long)us * 1000L };
+    nanosleep(&ts, NULL);
+}
+
 static void contract_failsafe(plc_failsafe_policy_t policy, uint8_t expect_byte) {
     const plc_adapter_factory_t *f = plc_adapter_registry_find("loopback");
     plc_protocol_adapter_t *a = f->create();
@@ -76,7 +93,7 @@ static void contract_failsafe(plc_failsafe_policy_t policy, uint8_t expect_byte)
     cfg.name = "failsafe";
     cfg.input_bytes = cfg.output_bytes = 8;
     cfg.failsafe_policy = policy;
-    cfg.consecutive_timeout_threshold = 3;
+    cfg.failsafe_timeout_us = FAILSAFE_WINDOW_US;
     CHECK_EQ_INT(plc_adapter_open(a, &cfg), PLC_OK);
 
     uint8_t out[8], in[8];
@@ -87,22 +104,25 @@ static void contract_failsafe(plc_failsafe_policy_t policy, uint8_t expect_byte)
     CHECK_EQ_INT(in[0], 0x5A);
     CHECK_EQ_INT(plc_adapter_state(a), PLC_ADAPTER_ONLINE);
 
-    plc_loopback_force_timeouts(a, 3);
+    plc_loopback_force_timeouts(a, 4);
 
-    /* Miss 1 and 2: below the threshold, so HOLD regardless of policy - one
-     * lost frame must not inject an edge into the process image. */
+    /* Inside the window: HOLD regardless of policy - a dropped frame must not
+     * inject an edge into the process image. */
     memset(in, 0xFF, sizeof(in));
     CHECK_EQ_INT(plc_adapter_exchange(a, out, sizeof(out), in, sizeof(in)),
                  PLC_ERR_TIMEOUT);
     CHECK_EQ_INT(in[0], 0x5A);
     CHECK_EQ_INT(plc_adapter_state(a), PLC_ADAPTER_DEGRADED);
 
+    sleep_us_(MISS_SPACING_US);
     memset(in, 0xFF, sizeof(in));
     CHECK_EQ_INT(plc_adapter_exchange(a, out, sizeof(out), in, sizeof(in)),
                  PLC_ERR_TIMEOUT);
     CHECK_EQ_INT(in[0], 0x5A);
+    CHECK_EQ_INT(plc_adapter_state(a), PLC_ADAPTER_DEGRADED);
 
-    /* Miss 3 crosses the threshold: now the configured policy decides. */
+    /* Past the window: the configured policy decides. */
+    sleep_us_(MISS_SPACING_US);
     memset(in, 0xFF, sizeof(in));
     CHECK_EQ_INT(plc_adapter_exchange(a, out, sizeof(out), in, sizeof(in)),
                  PLC_ERR_TIMEOUT);
@@ -111,14 +131,16 @@ static void contract_failsafe(plc_failsafe_policy_t policy, uint8_t expect_byte)
 
     plc_adapter_stats_t s;
     plc_adapter_get_stats(a, &s);
-    CHECK_EQ_INT(s.timeouts, 3);
+    CHECK(s.timeouts >= 3);
+    CHECK(s.stale_for_us >= FAILSAFE_WINDOW_US);
     CHECK_EQ_INT(s.failsafe_activations, 1);   /* the transition, not each scan */
 
-    /* Recovery: a good exchange clears the run and returns to ONLINE. */
+    /* Recovery: a good exchange makes the image fresh again. */
+    plc_loopback_force_timeouts(a, 0);
     CHECK_EQ_INT(plc_adapter_exchange(a, out, sizeof(out), in, sizeof(in)), PLC_OK);
     CHECK_EQ_INT(plc_adapter_state(a), PLC_ADAPTER_ONLINE);
     plc_adapter_get_stats(a, &s);
-    CHECK_EQ_INT(s.consecutive_timeouts, 0);
+    CHECK_EQ_INT(s.stale_for_us, 0);
 
     plc_adapter_close(a);
     f->destroy(a);

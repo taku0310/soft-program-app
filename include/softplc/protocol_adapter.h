@@ -117,8 +117,11 @@ typedef struct plc_adapter_caps {
     uint32_t output_bytes;  /**< PLC -> field, size exchange() consumes           */
 
     plc_failsafe_policy_t failsafe_policy;
-    uint32_t exchange_timeout_us;           /**< per-call budget; 0 = non-blocking  */
-    uint32_t consecutive_timeout_threshold; /**< misses before failsafe is applied  */
+    uint32_t exchange_timeout_us;  /**< per-call budget; 0 = non-blocking */
+    /** How long without a fresh image before the failsafe policy is applied.
+     *  A duration rather than a count of missed exchanges - see the field of
+     *  the same name in ::plc_adapter_config for why. */
+    uint32_t failsafe_timeout_us;
 
     uint32_t flags;                    /**< PLC_ADAPTER_CAP_* bits                 */
     uint32_t point_override_capacity;  /**< RESERVED, always 0 in this release     */
@@ -138,8 +141,29 @@ typedef struct plc_adapter_config {
     uint32_t output_bytes;
 
     plc_failsafe_policy_t failsafe_policy;
-    uint32_t exchange_timeout_us;           /**< 0 = adapter default */
-    uint32_t consecutive_timeout_threshold; /**< 0 = adapter default */
+    uint32_t exchange_timeout_us;  /**< 0 = adapter default */
+
+    /**
+     * @brief How long without a fresh image before failsafe.  0 = default.
+     *
+     * A **duration**, deliberately, not a count of consecutive misses.
+     *
+     * This was a count, and measurement showed why that was the wrong shape.
+     * Timeouts do not arrive independently: a host stall withholds data for
+     * tens of milliseconds and takes out every scan inside it, so the run
+     * length is really `stall / cycle`. Tuning a count against an observed
+     * maximum just gets beaten by the next longer stall - which is exactly
+     * what happened here, twice.
+     *
+     * Worse, a count silently changes meaning when the task period changes:
+     * the same "3" tolerates 30 ms at a 10 ms cycle and 3 ms at 1 ms, so
+     * retuning the scan rate would quietly retune the failsafe behaviour with
+     * it. A duration is the quantity anyone actually reasons about, and it is
+     * what CIP itself uses (a multiplier on RPI, i.e. a time).
+     *
+     * See ADR 0009 for the measurement.
+     */
+    uint32_t failsafe_timeout_us;
 } plc_adapter_config_t;
 
 /** Zero-initialised config with the neutral defaults. */
@@ -149,7 +173,9 @@ void plc_adapter_config_init(plc_adapter_config_t *cfg);
 typedef struct plc_adapter_stats {
     uint64_t exchanges;            /**< successful exchange() calls          */
     uint64_t timeouts;             /**< exchange() calls that timed out      */
-    uint64_t consecutive_timeouts; /**< current run of timeouts              */
+    /** Microseconds since the last fresh image; 0 while online.  This is what
+     *  the failsafe decision is made on, so it is the number to watch. */
+    uint64_t stale_for_us;
     uint64_t failsafe_activations; /**< transitions into PLC_ADAPTER_FAULTED */
     uint64_t protocol_errors;      /**< framing / sequence faults            */
     uint64_t last_rtt_us;          /**< round trip of the last exchange()    */
@@ -180,8 +206,10 @@ typedef struct plc_adapter_vtbl {
      * @p in with @p in_len bytes of field input image.
      *
      * @return ::PLC_OK on a fresh exchange.  ::PLC_ERR_TIMEOUT when the peer
-     *         missed its budget - @p in is still fully written, per the
-     *         configured failsafe policy, so the caller may use it either way.
+     *         missed its budget - @p in is still fully written, holding the
+     *         last good image until ::plc_adapter_caps::failsafe_timeout_us
+     *         has elapsed and then per the configured policy, so the caller
+     *         may use it either way.
      */
     plc_status_t (*exchange)(plc_protocol_adapter_t *self,
                              const void *out, size_t out_len,
@@ -216,6 +244,35 @@ plc_adapter_state_t plc_adapter_state(const plc_protocol_adapter_t *a);
 
 /** Human readable state name.  Never NULL. */
 const char *plc_adapter_state_name(plc_adapter_state_t s);
+
+/**
+ * @brief Tracks how long an adapter has gone without a fresh image.
+ *
+ * Shared so that the failsafe rule has exactly one implementation: three
+ * adapters each counting their own way is how HOLD and CLEAR end up meaning
+ * subtly different things per protocol.
+ */
+typedef struct plc_staleness {
+    uint64_t last_good_us;   /**< monotonic timestamp of the last fresh image */
+    int      have_good;      /**< false until the first successful exchange   */
+} plc_staleness_t;
+
+/** Monotonic microseconds.  Exposed because adapters need the same clock the
+ *  staleness helper uses. */
+uint64_t plc_now_us(void);
+
+/** Record a fresh image. */
+void plc_staleness_mark_fresh(plc_staleness_t *st);
+
+/**
+ * @brief How long since the last fresh image, in microseconds.
+ *
+ * Before the first successful exchange there is no "last good" to measure
+ * from, so this reports the time since @p opened_us instead - otherwise an
+ * adapter whose peer never appears would look perpetually fresh and never
+ * reach failsafe.
+ */
+uint64_t plc_staleness_age_us(const plc_staleness_t *st, uint64_t opened_us);
 
 /**
  * @brief Apply @p policy to @p in.

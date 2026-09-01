@@ -30,9 +30,11 @@ conservative starting point — holding cannot invent an edge that never
 happened, whereas clearing can — but the choice is meant to be made explicitly
 per deployment.
 
-**Below the threshold, both policies hold.** Only once
-`consecutive_timeout_threshold` is crossed does the configured policy take
-effect.
+**Inside the failsafe window, both policies hold.** Only once the image has
+been stale for `failsafe_timeout_us` does the configured policy take effect.
+(That was originally a count of consecutive misses; see
+[ADR 0009](0009-timeout-threshold-from-measurement.md) for the measurement
+that showed a count to be the wrong shape.)
 
 ## Consequences
 
@@ -51,7 +53,8 @@ Consequences:
   may use the buffer whatever the return code — which is what lets the scan
   engine treat an I/O fault as recoverable.
 * `failsafe_activations` counts the *transition* into `FAULTED`, not each
-  faulted scan, so it reads as "how many times did we lose the peer".
+  faulted scan, so it reads as "how many times did we lose the peer";
+  `stale_for_us` is the quantity the decision is actually made on.
 * Both policies are covered end-to-end across a real process kill
   (`test_eip_ipc.c`, `test_eip_failsafe_clear.c`) — testing only one would
   leave a selectable policy half verified.

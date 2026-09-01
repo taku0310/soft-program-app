@@ -106,7 +106,7 @@ and there is no config file to mount.
 | `SOFTPLC_EIP_CONSUMED_ASSEMBLY` | `150` | O→T instance |
 | `SOFTPLC_EIP_CONFIG_ASSEMBLY` | `151` | configuration instance |
 | `SOFTPLC_EIP_EXCHANGE_TIMEOUT_US` | `5000` | per-exchange budget; also the liveness check |
-| `SOFTPLC_EIP_TIMEOUT_THRESHOLD` | `5` | consecutive misses before failsafe — measured, see [ADR 0009](docs/adr/0009-timeout-threshold-from-measurement.md) |
+| `SOFTPLC_EIP_FAILSAFE_TIMEOUT_US` | `100000` | how long without a fresh image before failsafe — measured, see [ADR 0009](docs/adr/0009-timeout-threshold-from-measurement.md) |
 
 ### EtherNet/IP Scanner (originator role)
 
@@ -119,7 +119,7 @@ if the two disagree.
 |---|---|---|
 | `SOFTPLC_SCANNER_DEVICES` | `/etc/softplc/scanner-devices.conf` | path to the device table |
 | `SOFTPLC_SCANNER_EXCHANGE_TIMEOUT_US` | `5000` | per-exchange budget for the whole aggregate |
-| `SOFTPLC_SCANNER_TIMEOUT_THRESHOLD` | `5` | consecutive misses before the adapter-level failsafe |
+| `SOFTPLC_SCANNER_FAILSAFE_TIMEOUT_US` | `100000` | staleness before the adapter-level failsafe |
 
 The scanner's input image is a **health block followed by the device data**:
 one byte per device (`0` offline, `1` online, `2` connection lost and
@@ -165,16 +165,22 @@ Working:
 * Crash containment verified against a real `SIGKILL` of a real adapter
   process, for both `HOLD` and `CLEAR`; per-device loss verified separately.
 * Three container images sharing one `/dev/shm` namespace.
-* Timeout budget and failsafe threshold set from a measurement of the real
-  two-process path, not guessed ([ADR 0009](docs/adr/0009-timeout-threshold-from-measurement.md));
-  `tools/bench_exchange.c` is kept so they can be re-measured on target hardware.
+* Timeout budget and failsafe trigger set from 100 000 measured exchanges over
+  the real two-process path ([ADR 0009](docs/adr/0009-timeout-threshold-from-measurement.md)).
+  The measurement also changed the trigger's *shape*: a count of consecutive
+  misses turned out to be unfixable — two thresholds picked from an observed
+  maximum were both beaten by the next sample — so it is a duration now.
+  `tools/bench_exchange.c` is kept so it can be re-measured on target hardware.
 
 Not done, and deliberately so:
 
-* **The timeout threshold is measured, but on a shared cloud host, not on
-  target hardware.** [ADR 0009](docs/adr/0009-timeout-threshold-from-measurement.md)
-  has the numbers and the method; re-run `tools/bench_exchange.c` on the real
-  machine before trusting them there.
+* **The failsafe timeout is measured, but on a shared cloud host, not on target
+  hardware.** [ADR 0009](docs/adr/0009-timeout-threshold-from-measurement.md)
+  has the numbers and the method; re-run `tools/bench_exchange.c` — several
+  times, one sample is not enough — on the real machine before trusting it
+  there. That host produced ~50 ms of data loss from scheduling alone, which is
+  more than CIP's own minimum connection timeout at a 10 ms RPI would tolerate:
+  a general-purpose cloud VM is not a platform for hard 10 ms control.
 * **`point_overrides` is type-only** — the ABI slot is reserved, no adapter
   implements it ([ADR 0006](docs/adr/0006-point-overrides-reserved.md)).
 * **Modbus/TCP and OPC UA adapters are not written.** The EtherNet/IP pair is

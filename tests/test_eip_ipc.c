@@ -85,7 +85,10 @@ int main(void) {
     cfg.input_bytes = cfg.output_bytes = IMAGE_BYTES;
     cfg.failsafe_policy = PLC_FAILSAFE_HOLD;
     cfg.exchange_timeout_us = 200000;          /* generous: CI is slow */
-    cfg.consecutive_timeout_threshold = 3;
+    /* Each miss burns the full 200 ms budget, so 300 ms is crossed by the
+     * second one - the equivalent of the old "threshold 3", expressed as the
+     * duration it always really was. */
+    cfg.failsafe_timeout_us = 300000;
 
     CHECK_EQ_INT(plc_adapter_open(a, &cfg), PLC_OK);
 
@@ -134,7 +137,7 @@ int main(void) {
     plc_adapter_get_stats(a, &s);
     CHECK(s.exchanges >= 51);
     CHECK_EQ_INT(s.protocol_errors, 0);
-    CHECK_EQ_INT(s.consecutive_timeouts, 0);
+    CHECK_EQ_INT(s.stale_for_us, 0);
 
     /* --- crash containment ---------------------------------------------- */
 
@@ -146,21 +149,24 @@ int main(void) {
 
     memset(out, 0xAB, sizeof(out));
 
-    /* Misses 1 and 2: DEGRADED, image held. */
-    for (int i = 0; i < 2; ++i) {
-        memset(in, 0x11, sizeof(in));
-        CHECK_EQ_INT(plc_adapter_exchange(a, out, sizeof(out), in, sizeof(in)),
-                     PLC_ERR_TIMEOUT);
-        CHECK_EQ_INT(in[0], last_good);
-    }
-    CHECK_EQ_INT(plc_adapter_state(a), PLC_ADAPTER_DEGRADED);
-
-    /* Miss 3: threshold crossed, HOLD policy applied, and still held. */
+    /* First miss: inside the window, so DEGRADED with the image held. */
     memset(in, 0x11, sizeof(in));
     CHECK_EQ_INT(plc_adapter_exchange(a, out, sizeof(out), in, sizeof(in)),
                  PLC_ERR_TIMEOUT);
-    CHECK_EQ_INT(plc_adapter_state(a), PLC_ADAPTER_FAULTED);
     CHECK_EQ_INT(in[0], last_good);
+    CHECK_EQ_INT(plc_adapter_state(a), PLC_ADAPTER_DEGRADED);
+
+    /* Keep missing until the window is past. Bounded so a hang fails the test
+     * rather than spinning. */
+    int faulted = 0;
+    for (int i = 0; i < 10 && !faulted; ++i) {
+        memset(in, 0x11, sizeof(in));
+        CHECK_EQ_INT(plc_adapter_exchange(a, out, sizeof(out), in, sizeof(in)),
+                     PLC_ERR_TIMEOUT);
+        CHECK_EQ_INT(in[0], last_good);   /* HOLD policy: held either side */
+        faulted = (plc_adapter_state(a) == PLC_ADAPTER_FAULTED);
+    }
+    CHECK(faulted);
 
     plc_adapter_get_stats(a, &s);
     CHECK_EQ_INT(s.failsafe_activations, 1);

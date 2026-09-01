@@ -29,6 +29,9 @@ typedef struct loopback_impl {
     plc_adapter_stats_t stats;
     plc_adapter_state_t state;
 
+    plc_staleness_t stale;
+    uint64_t        opened_us;
+
     uint8_t last_good[LOOPBACK_MAX_BYTES];
     uint8_t mirror[LOOPBACK_MAX_BYTES];
 
@@ -70,11 +73,13 @@ static plc_status_t lb_open(plc_protocol_adapter_t *self,
     c->failsafe_policy = cfg->failsafe_policy;
     c->exchange_timeout_us =
         cfg->exchange_timeout_us ? cfg->exchange_timeout_us : 1000;
-    c->consecutive_timeout_threshold =
-        cfg->consecutive_timeout_threshold ? cfg->consecutive_timeout_threshold : 3;
+    c->failsafe_timeout_us =
+        cfg->failsafe_timeout_us ? cfg->failsafe_timeout_us : 30000;
     c->flags = 0;                     /* in-process: no crash containment */
     c->point_override_capacity = 0;   /* reserved, see protocol_adapter.h */
 
+    impl->opened_us = plc_now_us();
+    memset(&impl->stale, 0, sizeof(impl->stale));
     impl->state = PLC_ADAPTER_ONLINE;
     return PLC_OK;
 }
@@ -97,10 +102,10 @@ static plc_status_t lb_exchange(plc_protocol_adapter_t *self,
     if (impl->force_timeouts) {
         impl->force_timeouts--;
         impl->stats.timeouts++;
-        impl->stats.consecutive_timeouts++;
+        const uint64_t age = plc_staleness_age_us(&impl->stale, impl->opened_us);
+        impl->stats.stale_for_us = age;
 
-        if (impl->stats.consecutive_timeouts >=
-            impl->caps.consecutive_timeout_threshold) {
+        if (age >= impl->caps.failsafe_timeout_us) {
             if (impl->state != PLC_ADAPTER_FAULTED) {
                 impl->state = PLC_ADAPTER_FAULTED;
                 impl->stats.failsafe_activations++;
@@ -108,8 +113,8 @@ static plc_status_t lb_exchange(plc_protocol_adapter_t *self,
             plc_adapter_apply_failsafe(impl->caps.failsafe_policy,
                                        in, impl->last_good, in_len);
         } else {
-            /* Below the threshold a single miss always holds: one lost frame
-             * should not be allowed to inject an edge into the process image. */
+            /* Still inside the failsafe window: hold. One lost frame must not
+             * inject an edge into the process image. */
             impl->state = PLC_ADAPTER_DEGRADED;
             plc_adapter_apply_failsafe(PLC_FAILSAFE_HOLD,
                                        in, impl->last_good, in_len);
@@ -124,7 +129,8 @@ static plc_status_t lb_exchange(plc_protocol_adapter_t *self,
     }
 
     impl->stats.exchanges++;
-    impl->stats.consecutive_timeouts = 0;
+    plc_staleness_mark_fresh(&impl->stale);
+    impl->stats.stale_for_us = 0;
     impl->state = PLC_ADAPTER_ONLINE;
     return PLC_OK;
 }

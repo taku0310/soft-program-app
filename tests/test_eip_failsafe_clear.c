@@ -54,7 +54,7 @@ int main(void) {
     cfg.input_bytes = cfg.output_bytes = IMAGE_BYTES;
     cfg.failsafe_policy = PLC_FAILSAFE_CLEAR;
     cfg.exchange_timeout_us = 200000;
-    cfg.consecutive_timeout_threshold = 2;
+    cfg.failsafe_timeout_us = 300000;
     CHECK_EQ_INT(plc_adapter_open(a, &cfg), PLC_OK);
 
     const pid_t child = fork();
@@ -83,16 +83,21 @@ int main(void) {
     kill(child, SIGKILL);
     waitpid(child, NULL, 0);
 
-    /* Miss 1 is below the threshold, so it holds even under CLEAR. */
+    /* Inside the window it holds, even under CLEAR: that is the rule that
+     * stops one dropped frame injecting a falling edge on every input. */
     CHECK_EQ_INT(plc_adapter_exchange(a, out, sizeof(out), in, sizeof(in)),
                  PLC_ERR_TIMEOUT);
     CHECK_EQ_INT(in[0], last_good);
     CHECK_EQ_INT(plc_adapter_state(a), PLC_ADAPTER_DEGRADED);
 
-    /* Miss 2 crosses it: now the whole image must be zero. */
-    CHECK_EQ_INT(plc_adapter_exchange(a, out, sizeof(out), in, sizeof(in)),
-                 PLC_ERR_TIMEOUT);
-    CHECK_EQ_INT(plc_adapter_state(a), PLC_ADAPTER_FAULTED);
+    /* Past it, CLEAR means the whole image goes to zero. */
+    int faulted = 0;
+    for (int i = 0; i < 10 && !faulted; ++i) {
+        CHECK_EQ_INT(plc_adapter_exchange(a, out, sizeof(out), in, sizeof(in)),
+                     PLC_ERR_TIMEOUT);
+        faulted = (plc_adapter_state(a) == PLC_ADAPTER_FAULTED);
+    }
+    CHECK(faulted);
     for (unsigned i = 0; i < sizeof(in); ++i) CHECK_EQ_INT(in[i], 0x00);
 
     plc_adapter_close(a);

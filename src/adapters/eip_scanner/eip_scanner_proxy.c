@@ -47,17 +47,13 @@ typedef struct scanner_proxy {
     char               sem_req_name[EIP_SCANNER_SHM_NAME_MAX];
     char               sem_rsp_name[EIP_SCANNER_SHM_NAME_MAX];
 
-    uint32_t next_seq;
-    uint8_t  last_good[PLC_IPC_MAX_FRAME_BYTES];
+    uint32_t        next_seq;
+    plc_staleness_t stale;
+    uint64_t        opened_us;
+    uint8_t         last_good[PLC_IPC_MAX_FRAME_BYTES];
 
     plc_ipc_frame_t scratch;
 } scanner_proxy_t;
-
-static uint64_t now_us(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
-}
 
 static uint32_t env_u32(const char *key, uint32_t fallback) {
     const char *v = getenv(key);
@@ -158,17 +154,19 @@ static plc_status_t proxy_open(plc_protocol_adapter_t *self,
         ? cfg->exchange_timeout_us
         : env_u32("SOFTPLC_SCANNER_EXCHANGE_TIMEOUT_US",
                   EIP_SCANNER_DEFAULT_EXCHANGE_TIMEOUT_US);
-    c->consecutive_timeout_threshold = cfg->consecutive_timeout_threshold
-        ? cfg->consecutive_timeout_threshold
-        : env_u32("SOFTPLC_SCANNER_TIMEOUT_THRESHOLD",
-                  EIP_SCANNER_DEFAULT_TIMEOUT_THRESHOLD);
+    c->failsafe_timeout_us = cfg->failsafe_timeout_us
+        ? cfg->failsafe_timeout_us
+        : env_u32("SOFTPLC_SCANNER_FAILSAFE_TIMEOUT_US",
+                  EIP_SCANNER_DEFAULT_FAILSAFE_TIMEOUT_US);
     c->flags = PLC_ADAPTER_CAP_OUT_OF_PROCESS;
     c->point_override_capacity = 0;
 
     memset(&p->stats, 0, sizeof(p->stats));
     memset(p->last_good, 0, sizeof(p->last_good));
-    p->next_seq = 1;
-    p->state    = PLC_ADAPTER_OPENING;
+    p->next_seq  = 1;
+    p->opened_us = plc_now_us();
+    memset(&p->stale, 0, sizeof(p->stale));
+    p->state     = PLC_ADAPTER_OPENING;
 
     PLC_LOG_INFO("eip-scanner '%s' ready on %s: %u device(s), "
                  "%%I=%u (%u health + %u data) %%Q=%u",
@@ -211,16 +209,17 @@ static plc_status_t proxy_close(plc_protocol_adapter_t *self) {
 static plc_status_t proxy_fail(scanner_proxy_t *p, void *in, size_t in_len,
                                plc_status_t reason) {
     p->stats.timeouts++;
-    p->stats.consecutive_timeouts++;
+    const uint64_t age = plc_staleness_age_us(&p->stale, p->opened_us);
+    p->stats.stale_for_us = age;
 
-    if (p->stats.consecutive_timeouts >= p->caps.consecutive_timeout_threshold) {
+    if (age >= p->caps.failsafe_timeout_us) {
         if (p->state != PLC_ADAPTER_FAULTED) {
             p->state = PLC_ADAPTER_FAULTED;
             p->stats.failsafe_activations++;
-            PLC_LOG_WARN("eip-scanner '%s': %llu consecutive misses, "
+            PLC_LOG_WARN("eip-scanner '%s': no fresh image for %lluus, "
                          "applying %s failsafe to all %u devices",
                          p->caps.name,
-                         (unsigned long long)p->stats.consecutive_timeouts,
+                         (unsigned long long)age,
                          p->caps.failsafe_policy == PLC_FAILSAFE_CLEAR
                              ? "CLEAR" : "HOLD",
                          p->map ? p->map->device_count : 0);
@@ -242,7 +241,7 @@ static plc_status_t proxy_exchange(plc_protocol_adapter_t *self,
         return PLC_ERR_INVAL;
     }
 
-    const uint64_t t0  = now_us();
+    const uint64_t t0  = plc_now_us();
     const uint32_t seq = p->next_seq++;
 
     plc_spsc_drain(&p->map->rsp);
@@ -255,7 +254,7 @@ static plc_status_t proxy_exchange(plc_protocol_adapter_t *self,
     const uint32_t budget = p->caps.exchange_timeout_us;
     int matched = 0;
     while (!matched) {
-        const uint64_t spent = now_us() - t0;
+        const uint64_t spent = plc_now_us() - t0;
         if (spent >= budget) return proxy_fail(p, in, in_len, PLC_ERR_TIMEOUT);
 
         st = plc_sem_wait_timeout(p->sem_rsp, (uint32_t)(budget - spent));
@@ -292,9 +291,10 @@ static plc_status_t proxy_exchange(plc_protocol_adapter_t *self,
         memcpy(p->last_good, in, in_len);
     }
 
-    const uint64_t rtt = now_us() - t0;
+    const uint64_t rtt = plc_now_us() - t0;
     p->stats.exchanges++;
-    p->stats.consecutive_timeouts = 0;
+    plc_staleness_mark_fresh(&p->stale);
+    p->stats.stale_for_us = 0;
     p->stats.last_rtt_us = rtt;
     if (rtt > p->stats.max_rtt_us) p->stats.max_rtt_us = rtt;
 

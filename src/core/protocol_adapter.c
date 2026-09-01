@@ -2,16 +2,39 @@
 #include "softplc/protocol_adapter.h"
 
 #include <string.h>
+#include <time.h>
 
 void plc_adapter_config_init(plc_adapter_config_t *cfg) {
     if (!cfg) return;
     memset(cfg, 0, sizeof(*cfg));
     /* Everything zero means "let the adapter decide", which is what we want
-     * for the sizes and the timeouts.  The one field with no safe zero is the
+     * for the sizes and the timeouts (failsafe_timeout_us included).  The one field with no safe zero is the
      * failsafe policy, and HOLD is the conservative pick: keeping the last
      * good image cannot invent an edge that never happened, whereas CLEAR
      * can.  Plants that need CLEAR must say so. */
     cfg->failsafe_policy = PLC_FAILSAFE_HOLD;
+}
+
+uint64_t plc_now_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
+
+void plc_staleness_mark_fresh(plc_staleness_t *st) {
+    if (!st) return;
+    st->last_good_us = plc_now_us();
+    st->have_good    = 1;
+}
+
+uint64_t plc_staleness_age_us(const plc_staleness_t *st, uint64_t opened_us) {
+    if (!st) return 0;
+    const uint64_t from = st->have_good ? st->last_good_us : opened_us;
+    const uint64_t now  = plc_now_us();
+    /* CLOCK_MONOTONIC does not go backwards, but a zero opened_us from a
+     * caller that forgot to set it would produce an enormous age and an
+     * instant failsafe. Treat that as "no age yet" rather than a fault. */
+    return (from && now > from) ? (now - from) : 0;
 }
 
 const char *plc_adapter_state_name(plc_adapter_state_t s) {

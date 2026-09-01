@@ -49,17 +49,13 @@ typedef struct eip_proxy {
     char      sem_req_name[EIP_SHM_NAME_MAX];
     char      sem_rsp_name[EIP_SHM_NAME_MAX];
 
-    uint32_t next_seq;
-    uint8_t  last_good[PLC_IPC_MAX_FRAME_BYTES];
+    uint32_t        next_seq;
+    plc_staleness_t stale;
+    uint64_t        opened_us;
+    uint8_t         last_good[PLC_IPC_MAX_FRAME_BYTES];
 
     plc_ipc_frame_t scratch;   /* pre-allocated: exchange() must not malloc */
 } eip_proxy_t;
-
-static uint64_t now_us(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
-}
 
 static uint32_t env_u32(const char *key, uint32_t fallback) {
     const char *v = getenv(key);
@@ -149,15 +145,17 @@ static plc_status_t proxy_open(plc_protocol_adapter_t *self,
     c->exchange_timeout_us = cfg->exchange_timeout_us
         ? cfg->exchange_timeout_us
         : env_u32("SOFTPLC_EIP_EXCHANGE_TIMEOUT_US", EIP_DEFAULT_EXCHANGE_TIMEOUT_US);
-    c->consecutive_timeout_threshold = cfg->consecutive_timeout_threshold
-        ? cfg->consecutive_timeout_threshold
-        : env_u32("SOFTPLC_EIP_TIMEOUT_THRESHOLD", EIP_DEFAULT_TIMEOUT_THRESHOLD);
+    c->failsafe_timeout_us = cfg->failsafe_timeout_us
+        ? cfg->failsafe_timeout_us
+        : env_u32("SOFTPLC_EIP_FAILSAFE_TIMEOUT_US", EIP_DEFAULT_FAILSAFE_TIMEOUT_US);
     c->flags = PLC_ADAPTER_CAP_OUT_OF_PROCESS;
     c->point_override_capacity = 0;   /* reserved; see protocol_adapter.h */
 
     memset(&p->stats, 0, sizeof(p->stats));
     memset(p->last_good, 0, sizeof(p->last_good));
-    p->next_seq = 1;
+    p->next_seq  = 1;
+    p->opened_us = plc_now_us();
+    memset(&p->stale, 0, sizeof(p->stale));
 
     /* OPENING, not ONLINE: the adapter process may not even have started.
      * The first successful exchange is what promotes this. */
@@ -165,7 +163,7 @@ static plc_status_t proxy_open(plc_protocol_adapter_t *self,
 
     PLC_LOG_INFO("eip proxy '%s' ready on %s (in=%u out=%u timeout=%uus threshold=%u failsafe=%s)",
                  c->name, shm_name, in, out,
-                 c->exchange_timeout_us, c->consecutive_timeout_threshold,
+                 c->exchange_timeout_us, c->failsafe_timeout_us,
                  c->failsafe_policy == PLC_FAILSAFE_CLEAR ? "CLEAR" : "HOLD");
     return PLC_OK;
 }
@@ -183,24 +181,24 @@ static plc_status_t proxy_close(plc_protocol_adapter_t *self) {
 /**
  * Record a missed exchange and write the input image the core will run on.
  *
- * Below the threshold we always HOLD, even when the configured policy is
- * CLEAR: a single dropped frame is a transport hiccup, and zeroing the image
- * for one scan would inject a falling edge on every input that a POU would
- * see as a real event.  CLEAR is about a peer that is gone, and that is what
- * the threshold decides.
+ * Until the image has been stale for failsafe_timeout_us we always HOLD, even
+ * when the configured policy is CLEAR: a dropped frame is a transport hiccup,
+ * and zeroing the image would inject a falling edge on every input that a POU
+ * would see as a real event.  CLEAR is about a peer that is *gone*, and how
+ * long that takes to establish is what the timeout expresses.
  */
 static plc_status_t proxy_fail(eip_proxy_t *p, void *in, size_t in_len,
                                plc_status_t reason) {
     p->stats.timeouts++;
-    p->stats.consecutive_timeouts++;
+    const uint64_t age = plc_staleness_age_us(&p->stale, p->opened_us);
+    p->stats.stale_for_us = age;
 
-    if (p->stats.consecutive_timeouts >= p->caps.consecutive_timeout_threshold) {
+    if (age >= p->caps.failsafe_timeout_us) {
         if (p->state != PLC_ADAPTER_FAULTED) {
             p->state = PLC_ADAPTER_FAULTED;
             p->stats.failsafe_activations++;
-            PLC_LOG_WARN("eip '%s': %llu consecutive misses, applying %s failsafe",
-                         p->caps.name,
-                         (unsigned long long)p->stats.consecutive_timeouts,
+            PLC_LOG_WARN("eip '%s': no fresh image for %lluus, applying %s failsafe",
+                         p->caps.name, (unsigned long long)age,
                          p->caps.failsafe_policy == PLC_FAILSAFE_CLEAR
                              ? "CLEAR" : "HOLD");
         }
@@ -221,7 +219,7 @@ static plc_status_t proxy_exchange(plc_protocol_adapter_t *self,
         return PLC_ERR_INVAL;
     }
 
-    const uint64_t t0  = now_us();
+    const uint64_t t0  = plc_now_us();
     const uint32_t seq = p->next_seq++;
 
     /* Anything still queued predates this request and is stale by definition:
@@ -243,7 +241,7 @@ static plc_status_t proxy_exchange(plc_protocol_adapter_t *self,
     const uint32_t budget = p->caps.exchange_timeout_us;
     int matched = 0;
     while (!matched) {
-        const uint64_t spent = now_us() - t0;
+        const uint64_t spent = plc_now_us() - t0;
         if (spent >= budget) return proxy_fail(p, in, in_len, PLC_ERR_TIMEOUT);
 
         st = plc_sem_wait_timeout(p->sem_rsp, (uint32_t)(budget - spent));
@@ -288,9 +286,10 @@ static plc_status_t proxy_exchange(plc_protocol_adapter_t *self,
         memcpy(p->last_good, in, in_len);
     }
 
-    const uint64_t rtt = now_us() - t0;
+    const uint64_t rtt = plc_now_us() - t0;
     p->stats.exchanges++;
-    p->stats.consecutive_timeouts = 0;
+    plc_staleness_mark_fresh(&p->stale);
+    p->stats.stale_for_us = 0;
     p->stats.last_rtt_us = rtt;
     if (rtt > p->stats.max_rtt_us) p->stats.max_rtt_us = rtt;
 
