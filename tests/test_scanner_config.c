@@ -5,10 +5,10 @@
 
 static void test_good_table(void) {
     static const char text[] =
-        "# ip          cfg  o2t  t2o  o2t_len t2o_len rpi    failsafe\n"
-        "192.168.1.10  151  150  100  32      32      10000  hold\n"
+        "# ip         cfg o2t t2o o2t_len t2o_len rpi   mult failsafe\n"
+        "192.168.1.10 151 150 100 32      32      10000 2    hold\n"
         "\n"
-        "192.168.1.11  151  150  100  8       16      5000   clear   # a drive\n";
+        "192.168.1.11 151 150 100 8       16      5000  3    clear   # a drive\n";
 
     eip_scanner_config_t cfg;
     char err[160] = "";
@@ -22,6 +22,8 @@ static void test_good_table(void) {
     CHECK_EQ_INT(cfg.devices[0].o2t_rpi_us, 10000);
     CHECK_EQ_INT(cfg.devices[0].failsafe_policy, PLC_FAILSAFE_HOLD);
     CHECK_EQ_INT(cfg.devices[1].failsafe_policy, PLC_FAILSAFE_CLEAR);
+    CHECK_EQ_INT(cfg.devices[0].timeout_multiplier, 2);
+    CHECK_EQ_INT(cfg.devices[1].timeout_multiplier, 3);
 
     /* Devices pack in table order, so the %I/%Q map reads straight off the
      * file - which is what someone wiring a POU to a drive needs. */
@@ -48,25 +50,32 @@ static void test_bad_fields(void) {
     eip_scanner_config_t cfg;
     char err[160];
 
+    /* The multiplier decides when a drive drops its link, so an out-of-range
+     * value must be refused rather than truncated into something plausible. */
     CHECK_EQ_INT(eip_scanner_config_parse(&cfg,
-        "10.0.0.1 151 150 100 32 32 10000 maybe\n", err, sizeof(err)),
+        "10.0.0.1 151 150 100 32 32 10000 9 hold\n", err, sizeof(err)),
+        PLC_ERR_INVAL);
+    CHECK(strstr(err, "multiplier") != NULL);
+
+    CHECK_EQ_INT(eip_scanner_config_parse(&cfg,
+        "10.0.0.1 151 150 100 32 32 10000 2 maybe\n", err, sizeof(err)),
         PLC_ERR_INVAL);
     CHECK(strstr(err, "failsafe") != NULL);
 
     /* RPI 0 would mean "as fast as possible", which no scanner should accept
      * by accident. */
     CHECK_EQ_INT(eip_scanner_config_parse(&cfg,
-        "10.0.0.1 151 150 100 32 32 0 hold\n", err, sizeof(err)),
+        "10.0.0.1 151 150 100 32 32 0 2 hold\n", err, sizeof(err)),
         PLC_ERR_INVAL);
     CHECK(strstr(err, "RPI") != NULL);
 
     CHECK_EQ_INT(eip_scanner_config_parse(&cfg,
-        "10.0.0.1 151 150 100 32 32 abc hold\n", err, sizeof(err)),
+        "10.0.0.1 151 150 100 32 32 abc 2 hold\n", err, sizeof(err)),
         PLC_ERR_INVAL);
 
     /* Trailing junk in a number must not be accepted as the number. */
     CHECK_EQ_INT(eip_scanner_config_parse(&cfg,
-        "10.0.0.1 151x 150 100 32 32 10000 hold\n", err, sizeof(err)),
+        "10.0.0.1 151x 150 100 32 32 10000 2 hold\n", err, sizeof(err)),
         PLC_ERR_INVAL);
 }
 
@@ -84,7 +93,7 @@ static void test_aggregate_limit(void) {
     char text[4096] = "";
     for (int i = 0; i < 40; ++i) {
         char row[128];
-        snprintf(row, sizeof(row), "10.0.0.%d 151 150 100 32 32 10000 hold\n", i);
+        snprintf(row, sizeof(row), "10.0.0.%d 151 150 100 32 32 10000 2 hold\n", i);
         strcat(text, row);
     }
     eip_scanner_config_t cfg;

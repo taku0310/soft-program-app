@@ -49,8 +49,12 @@ done
 sleep 1
 rm -f /dev/shm/softplc.* /dev/shm/sem.softplc.* "$S"/e2e*.log
 
+# RPI is a knob because it interacts with the scan rate: the process image
+# holds the last frame received, so a scan at or faster than the RPI re-reads
+# the same value. E2E_RPI_US lets that be demonstrated rather than asserted.
+RPI_US="${E2E_RPI_US:-10000}"
 cat > "$S/devA.conf" <<EOF
-10.10.0.1  151 150 100  32 32  10000 hold
+10.10.0.1  151 150 100  32 32  $RPI_US ${E2E_TMO_MULT:-2} hold
 EOF
 
 # PLC A runs longer than B on purpose: whichever side exits first unlinks its
@@ -70,6 +74,20 @@ sleep 1
 ip netns exec plcB env SOFTPLC_SCANNER_STACK_LOG=info \
   $B/softplc-eip-scanner plcB "$S/devA.conf" > "$S/e2eB-eip.log" 2>&1 &
 
+# --- mid-run: drop and restore PLC A's CIP stack -------------------------
+# Exercises the paths that only a real connection loss reaches: OpENer's
+# CheckIoConnectionEvent on the target side, and on the scanner side the
+# close listener plus the gated reconnect. Nothing else in the suite runs
+# them, because the mirror backends never lose a connection.
+if [ "${E2E_RECONNECT:-1}" = "1" ]; then
+  sleep 4
+  echo "--- dropping PLC A's CIP stack ---"
+  for pid in $(pgrep -f "$B/softplc-eip-adapter" 2>/dev/null); do kill -9 "$pid" 2>/dev/null; done
+  sleep 3
+  echo "--- restoring it ---"
+  ip netns exec plcA $B/softplc-eip-adapter plcA vethA >> "$S/e2eA-eip.log" 2>&1 &
+fi
+
 wait
 
 echo
@@ -77,7 +95,13 @@ echo "================ RESULT ================"
 grep -h "sent=" "$S/e2eA.log" "$S/e2eB.log" 2>/dev/null
 grep -h "health byte" "$S/e2eB.log" 2>/dev/null
 echo
-echo "Pass criterion: each side's last_input is the OTHER side's pattern"
-echo "(A sends 0xA1 and must see 0xB2; B sends 0xB2 and must see 0xA1),"
-echo "and timeouts after warm-up are ~0."
+echo "Pass criteria:"
+echo "  peer_tag is the OTHER side's tag (A=0xA1, B=0xB2) - not a loopback"
+echo "  fresh > 0                                          - frames keep changing"
+echo "  corrupt = 0                                        - byte offsets intact"
+echo "  the scanner reconnected after the stack was killed mid-run"
+echo
+echo "Reconnect evidence (scanner):"
+grep -c "Open IO connection" "$S/e2eB-eip.log" 2>/dev/null \
+  | sed "s/^/  ForwardOpen count (>1 means it reconnected): /"
 echo "Logs: $S/e2e*.log"

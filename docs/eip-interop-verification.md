@@ -71,6 +71,71 @@ Separate containers get separate namespaces by default, so
 `docker/docker-compose.yml` is already correct — but do not collapse the two
 services with `network_mode: service:`.
 
+## What the frames carry, and why it is not a constant
+
+The first version of this harness filled the output image with a single
+repeated byte. That is enough to prove "A sees B and B sees A", and nothing
+else — a constant fill passes unchanged through a stale frame, a repeated
+frame, or a one-byte shift in the image map.
+
+Each side now sends a 32-bit sequence number followed by bytes derived from
+their own index and the sender's tag, which separates three faults a constant
+could not:
+
+| fault | how it shows |
+|---|---|
+| loopback, echo, wrong peer | `peer_tag` is not the other side's |
+| stale or repeated frame | the sequence stops advancing (`fresh` vs `stale`) |
+| byte-offset error in the map | the per-index bytes do not match (`corrupt`) |
+
+`corrupt = 0` in both directions across the whole 32-byte image is information
+the earlier constant-fill run simply did not contain.
+
+## Losing and regaining the connection
+
+The script kills PLC A's CIP stack mid-run and restarts it. Nothing else in
+the suite reaches those paths: the mirror backends never lose a connection, so
+OpENer's `CheckIoConnectionEvent` on the target side and the scanner's close
+listener and gated reconnect had never executed.
+
+They work. The scanner logs the connection closing, retries on its 2 s gate,
+and reopens — the ForwardOpen count goes above one and data resumes. The
+adapter side meanwhile times out for exactly the ~300 scans its stack was
+down (3 s at a 10 ms task) and returns to `ONLINE`.
+
+## RPI, the CIP timeout multiplier, and this host
+
+`connectionTimeoutMultiplier` was left at 0. That is CIP's **minimum**: the
+target drops the link after `(4 << mult) × RPI` without a frame, so 0 means 4 ×
+RPI. It is now a per-device field in the table, because measurement showed the
+minimum is unusable here.
+
+At RPI 2 ms, multiplier 0 gives an 8 ms budget:
+
+| RPI 2 ms | multiplier 0 (8 ms) | multiplier 4 (128 ms) |
+|---|---|---|
+| ForwardOpens in ~12 s | **15** (14 reconnects) | **1** |
+| connection closed by timeout | 14 | **0** |
+| scanner fresh / stale frames | 1 / 498 | **486 / 12** |
+
+The link spent the whole run being torn down and rebuilt, delivering almost no
+fresh data while still reporting `ONLINE` — the failure mode is quiet, which is
+what makes it worth a test.
+
+This is the prediction in [ADR 0009](adr/0009-timeout-threshold-from-measurement.md)
+turning into a measurement. That ADR argued from the scheduling data that "a
+real scanner talking to this machine would drop its connections"; here one
+does, on demand, and stops when the budget is raised above what the host's
+scheduling actually costs.
+
+Two things follow. **The default multiplier should be 2 (×16) or more**, not
+CIP's minimum — 160 ms at a 10 ms RPI, comfortably above the ~50 ms of
+disruption measured in ADR 0009. And **the fresh/stale ratio is set by RPI
+against scan rate**, not by anything being wrong: at RPI 2 ms under a 10 ms
+scan the scanner sees 486 fresh of 499, while at RPI 10 ms under a 10 ms scan
+it sees roughly half, because the process image holds the last frame received
+and an unsynchronised scan re-reads it.
+
 ## A measurement trap this run walked into
 
 The first instrumented run reported **14–20 % of exchanges timing out**, which

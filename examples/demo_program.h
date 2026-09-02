@@ -8,6 +8,9 @@
 /** State for the demo POU.  Zero-initialise before the first scan. */
 typedef struct demo_state {
     plc_ton_t   start_delay;
+    /** Edge on the start delay completing.  The latch must be set by the
+     *  transition, never by the level - see demo_program.c. */
+    plc_r_trig_t start_edge;
     plc_tp_t    lamp_pulse;
     plc_r_trig_t part_edge;
     plc_ctu_t   part_counter;

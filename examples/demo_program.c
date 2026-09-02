@@ -11,7 +11,8 @@
  *     %IX0.2  PART_SENSE %QW2    PART_COUNT
  *
  * The motor needs START held for 500 ms before it runs, STOP drops it
- * immediately, each part edge pulses the lamp for 200 ms and bumps the count.
+ * immediately and it stays down until START is deliberately re-actuated, each
+ * part edge pulses the lamp for 200 ms and bumps the count.
  *
  * Worth reading for what it shows about the I/O path: this code only ever
  * touches the process image.  It has no idea whether %IX0.2 arrives over
@@ -35,7 +36,17 @@ void demo_program(plc_pou_ctx_t *ctx) {
     st->start_delay.PT = PLC_TIME_MS(500);
     plc_ton_run(&st->start_delay, ctx->dt);
 
-    st->running.S  = st->start_delay.Q;
+    /* Set the latch on the *edge* of the delay completing, not on its level.
+     *
+     * Driving S from start_delay.Q directly restarts the motor the moment
+     * STOP is released, because a held START keeps that output true - the
+     * operator never re-actuates anything. A stop must require a deliberate
+     * restart, so the set has to be a one-shot: START must be released (which
+     * resets the TON) and held again to produce another edge. */
+    st->start_edge.CLK = st->start_delay.Q;
+    plc_r_trig_run(&st->start_edge);
+
+    st->running.S  = st->start_edge.Q;
     st->running.R1 = stop_pressed;
     plc_rs_run(&st->running);
 

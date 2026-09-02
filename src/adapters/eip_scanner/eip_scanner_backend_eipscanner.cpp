@@ -95,6 +95,11 @@ ConnectionParameters make_params(const eip_scanner_device_t &d) {
 
     p.o2tRPI = d.o2t_rpi_us;
     p.t2oRPI = d.t2o_rpi_us;
+    /* Was left at 0 - CIP's minimum, (4 << 0) = 4x RPI. Measured at RPI 2 ms
+     * that 8 ms budget reopened the connection 14 times in 12 seconds on this
+     * host. Per device, because how much scheduling slack a link needs is a
+     * property of the host, not of the protocol. */
+    p.connectionTimeoutMultiplier = d.timeout_multiplier;
     p.transportTypeTrigger |= NetworkConnectionParams::CLASS1;
     return p;
 }

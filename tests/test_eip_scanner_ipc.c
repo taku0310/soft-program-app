@@ -39,10 +39,10 @@
 /* Four devices, matching the deployment this was built for. Sizes differ per
  * device on purpose: equal sizes would hide an offset bug. */
 static const char kTable[] =
-    "127.0.0.1  151 150 100  8  8   10000 hold\n"
-    "127.0.0.2  151 150 100  4  4   10000 clear\n"
-    "127.0.0.3  151 150 100 16 16   10000 hold\n"
-    "127.0.0.4  151 150 100  4  4   10000 hold\n";
+    "127.0.0.1  151 150 100  8  8   10000 2 hold\n"
+    "127.0.0.2  151 150 100  4  4   10000 2 clear\n"
+    "127.0.0.3  151 150 100 16 16   10000 2 hold\n"
+    "127.0.0.4  151 150 100  4  4   10000 2 hold\n";
 
 #define DEVICES      4
 #define HEALTH_BYTES DEVICES

@@ -7,7 +7,7 @@
 
 #include "softplc/ipc/spsc_ring.h"
 
-#define FIELDS_PER_DEVICE 8
+#define FIELDS_PER_DEVICE 9
 
 static int parse_u32(const char *tok, unsigned long max, uint32_t *out) {
     char *end = NULL;
@@ -60,7 +60,8 @@ plc_status_t eip_scanner_config_parse(eip_scanner_config_t *cfg,
 
         if (count != FIELDS_PER_DEVICE) {
             return fail(err, err_len, line_no,
-                        "expected 8 fields: ip cfg o2t t2o o2t_len t2o_len rpi_us failsafe");
+                        "expected 9 fields: ip cfg o2t t2o o2t_len t2o_len "
+                        "rpi_us tmo_mult failsafe");
         }
         if (cfg->device_count >= EIP_SCANNER_MAX_DEVICES) {
             return fail(err, err_len, line_no, "too many devices");
@@ -97,8 +98,14 @@ plc_status_t eip_scanner_config_parse(eip_scanner_config_t *cfg,
         d->o2t_rpi_us = v;
         d->t2o_rpi_us = v;
 
-        if      (strcmp(tok[7], "hold")  == 0) d->failsafe_policy = PLC_FAILSAFE_HOLD;
-        else if (strcmp(tok[7], "clear") == 0) d->failsafe_policy = PLC_FAILSAFE_CLEAR;
+        if (!parse_u32(tok[7], 7, &v)) {
+            return fail(err, err_len, line_no,
+                        "timeout multiplier must be 0..7 (x4 .. x512 of the RPI)");
+        }
+        d->timeout_multiplier = (uint8_t)v;
+
+        if      (strcmp(tok[8], "hold")  == 0) d->failsafe_policy = PLC_FAILSAFE_HOLD;
+        else if (strcmp(tok[8], "clear") == 0) d->failsafe_policy = PLC_FAILSAFE_CLEAR;
         else return fail(err, err_len, line_no, "failsafe must be 'hold' or 'clear'");
 
         /* Devices are packed in table order, so the %I/%Q layout is readable

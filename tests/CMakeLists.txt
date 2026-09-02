@@ -13,6 +13,15 @@ softplc_add_test(test_process_image)
 softplc_add_test(test_std_fb)
 softplc_add_test(test_adapter_contract)
 
+# The ladder logic itself. Needs the examples dir for the POU it exercises.
+add_executable(test_demo_program test_demo_program.c
+               ${CMAKE_SOURCE_DIR}/examples/demo_program.c)
+target_link_libraries(test_demo_program PRIVATE ${SOFTPLC_ADAPTERS_LINK})
+target_include_directories(test_demo_program PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/examples)
+add_test(NAME test_demo_program COMMAND test_demo_program)
+set_tests_properties(test_demo_program PROPERTIES TIMEOUT 60)
+
 if(SOFTPLC_WITH_EIP_SCANNER)
   softplc_add_test(test_scanner_config)
 endif()

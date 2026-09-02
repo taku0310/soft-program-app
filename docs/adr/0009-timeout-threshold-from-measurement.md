@@ -96,6 +96,16 @@ drop its connections. That is a statement about the host, not the code, and it
 is the clearest available evidence that a general-purpose cloud VM is not a
 platform for hard 10 ms control.
 
+**Since confirmed by measurement, not left as an argument.** Running the two
+roles against each other at RPI 2 ms with the multiplier at CIP's minimum — an
+8 ms budget — the link was torn down and rebuilt 14 times in 12 seconds and
+delivered 1 fresh frame in 499 while still reporting `ONLINE`. Raising the
+multiplier to 4 (a 128 ms budget) took it to a single connection, zero
+timeouts and 486 fresh frames. The multiplier is a per-device field in the
+scanner's table now, and its default should be 2 (×16) or higher rather than
+CIP's minimum. See
+[eip-interop-verification.md](../eip-interop-verification.md).
+
 The budget stays where it was, and the measurement is what justifies it: p99.99
 landed at 4534 µs, just inside 5 ms, so the budget sits at the knee of the
 distribution. Widening it to swallow the 23 ms outliers would mean a

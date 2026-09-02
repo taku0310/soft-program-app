@@ -12,9 +12,9 @@
  * has no third-party runtime dependencies and a device table is not worth
  * acquiring one for.  A parser for it is about sixty lines.
  *
- *     # ip              cfg  o2t  t2o  o2t_len  t2o_len  rpi_us   failsafe
- *     192.168.1.10      151  150  100  32       32       10000    hold
- *     192.168.1.11      151  150  100  8        8        10000    clear
+ *     # ip           cfg o2t t2o o2t_len t2o_len rpi_us tmo_mult failsafe
+ *     192.168.1.10   151 150 100 32      32      10000  2        hold
+ *     192.168.1.11   151 150 100 8       8       10000  2        clear
  *
  * Columns are whitespace separated, '#' starts a comment, blank lines are
  * skipped.  Every field is required; a short row is an error rather than a
@@ -52,6 +52,18 @@ typedef struct eip_scanner_device {
 
     uint32_t o2t_rpi_us;        /**< requested packet interval, O->T */
     uint32_t t2o_rpi_us;        /**< requested packet interval, T->O */
+
+    /**
+     * @brief CIP connection timeout multiplier, 0..7 -> x4 .. x512 of the RPI.
+     *
+     * The target drops the connection after `(4 << mult) * RPI` without a
+     * frame. Zero is CIP's minimum and is almost never right off a
+     * real-time kernel: at a 10 ms RPI it gives a 40 ms budget, and a
+     * general-purpose host loses more than that to scheduling (ADR 0009).
+     * Measured here at RPI 2 ms with mult 0 - an 8 ms budget - the link
+     * reopened 14 times in 12 seconds and delivered almost no fresh data.
+     */
+    uint8_t timeout_multiplier;
 
     /** Per device, because one drive dropping should not be forced to mean the
      *  same thing as another.  Applied inside the scanner adapter, to this
