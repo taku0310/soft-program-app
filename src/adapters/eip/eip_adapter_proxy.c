@@ -161,7 +161,7 @@ static plc_status_t proxy_open(plc_protocol_adapter_t *self,
      * The first successful exchange is what promotes this. */
     p->state = PLC_ADAPTER_OPENING;
 
-    PLC_LOG_INFO("eip proxy '%s' ready on %s (in=%u out=%u timeout=%uus threshold=%u failsafe=%s)",
+    PLC_LOG_INFO("eip proxy '%s' ready on %s (in=%u out=%u exchange_timeout=%uus failsafe_after=%uus policy=%s)",
                  c->name, shm_name, in, out,
                  c->exchange_timeout_us, c->failsafe_timeout_us,
                  c->failsafe_policy == PLC_FAILSAFE_CLEAR ? "CLEAR" : "HOLD");

@@ -209,6 +209,13 @@ Nothing in `src/core/` changes. For an out-of-process protocol, `src/ipc/` and
 the proxy/service-loop split in `src/adapters/eip/` are meant to be copied —
 the crash-containment behaviour comes with them.
 
+## Interop verification
+
+The two roles have been run against each other over real EtherNet/IP class 1
+traffic — see [eip-interop-verification.md](eip-interop-verification.md) for
+the procedure, the result, and why the two roles cannot share a network
+namespace.
+
 ## Known gaps
 
 * **The failsafe timeout is measured, but on the wrong hardware.**

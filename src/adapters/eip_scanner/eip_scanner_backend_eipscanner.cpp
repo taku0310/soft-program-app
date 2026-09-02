@@ -24,6 +24,7 @@
 #include "eip_scanner_shm_layout_public.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -166,7 +167,18 @@ plc_status_t scanner_init(const eip_scanner_config_t *cfg) {
     if (!cfg || cfg->device_count == 0) return PLC_ERR_INVAL;
     g_cfg = *cfg;
 
-    eipScanner::utils::Logger::setLogLevel(eipScanner::utils::LogLevel::WARNING);
+    /* The stack's own log level, separate from ours: diagnosing a connection
+     * that will not establish needs its ForwardOpen and connection-lifecycle
+     * lines, and hard-coding WARNING makes that impossible in the field. */
+    {
+        eipScanner::utils::LogLevel lvl = eipScanner::utils::LogLevel::WARNING;
+        if (const char *v = std::getenv("SOFTPLC_SCANNER_STACK_LOG")) {
+            if      (std::strcmp(v, "debug") == 0) lvl = eipScanner::utils::LogLevel::DEBUG;
+            else if (std::strcmp(v, "info")  == 0) lvl = eipScanner::utils::LogLevel::INFO;
+            else if (std::strcmp(v, "error") == 0) lvl = eipScanner::utils::LogLevel::ERROR;
+        }
+        eipScanner::utils::Logger::setLogLevel(lvl);
+    }
 
     g_cm = std::make_unique<ConnectionManager>();
     g_devices.clear();

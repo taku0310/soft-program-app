@@ -1,12 +1,19 @@
 # Container deployment
 
-Two images, because the whole point of the out-of-process adapter is that the
+Three images, because the whole point of the out-of-process adapter is that a
 protocol stack and the PLC core fail independently:
 
 | image | contains | may crash |
 |---|---|---|
 | `Dockerfile.plc-core` | IEC 61131-3 runtime, adapter proxies | no |
-| `Dockerfile.eip-adapter` | OpENer, CIP, the network sockets | yes, by design |
+| `Dockerfile.eip-adapter` | OpENer, CIP target sockets (Adapter role) | yes, by design |
+| `Dockerfile.eip-scanner` | EIPScanner, CIP originator (Scanner role) | yes, by design |
+
+**The two EtherNet/IP roles must not share a network namespace.** CIP class 1
+uses a fixed UDP port (2222) at both ends, so an Adapter and a Scanner on one
+host fight over it and each receives its own transmissions. Separate containers
+get separate namespaces by default, which is why the compose file below works —
+do not collapse them with `network_mode: service:`.
 
 ## Quick start
 
@@ -49,10 +56,11 @@ wait for a peer that is not there.
 Neither process restarts the other; that is the orchestrator's job, and the
 code is written on that assumption.
 
-* **Adapter dies.** The core's `exchange()` starts timing out. After
-  `SOFTPLC_EIP_TIMEOUT_THRESHOLD` consecutive misses it applies the failsafe
-  policy and keeps scanning. `restart: unless-stopped` brings the adapter back;
-  it re-attaches and exchanges resume with no core intervention.
+* **Adapter dies.** The core's `exchange()` starts timing out. Once the input
+  image has been stale for `SOFTPLC_EIP_FAILSAFE_TIMEOUT_US` it applies the
+  failsafe policy and keeps scanning; until then it holds. `restart:
+  unless-stopped` brings the adapter back; it re-attaches and exchanges resume
+  with no core intervention.
 * **Core dies.** It unlinks the IPC objects on the way out. The adapter's next
   wait fails and it exits non-zero, and is restarted; it then waits for the new
   core to publish a region.
