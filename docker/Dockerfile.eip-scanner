@@ -1,0 +1,56 @@
+# syntax=docker/dockerfile:1
+# SPDX-License-Identifier: Apache-2.0
+#
+# The EtherNet/IP Scanner (originator) process, with the real EIPScanner stack.
+#
+# The other container that is allowed to crash. It drives the remote devices
+# and holds the C++ dependency; the PLC core stays C11 and never links any of
+# this. Restart policy belongs to compose or the orchestrator, not here.
+
+FROM debian:bookworm-slim AS build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY CMakeLists.txt ./
+COPY cmake        ./cmake
+COPY include      ./include
+COPY src          ./src
+COPY examples     ./examples
+COPY tests        ./tests
+COPY third_party  ./third_party
+
+# Fail loudly rather than silently falling back to the mirror backend: an image
+# built from a missing submodule would come up, connect to nothing, and look
+# healthy.
+RUN test -f third_party/EIPScanner/src/ConnectionManager.h \
+    || (echo "third_party/EIPScanner is empty - run 'git submodule update --init --recursive' before building" >&2; exit 1)
+
+RUN cmake -S . -B build \
+        -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+        -DSOFTPLC_WITH_EIP=OFF \
+        -DSOFTPLC_WITH_EIP_SCANNER=ON \
+        -DSOFTPLC_WITH_EIPSCANNER=ON \
+        -DSOFTPLC_BUILD_TESTS=OFF \
+    && cmake --build build -j"$(nproc)" --target softplc-eip-scanner
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /src/build/softplc-eip-scanner /usr/local/bin/softplc-eip-scanner
+
+VOLUME ["/dev/shm"]
+
+# As originator this container opens outbound sessions to each device on TCP
+# 44818 and exchanges Class 1 I/O over UDP 2222. It listens on neither, so
+# nothing is exposed.
+ENV SOFTPLC_INSTANCE=default \
+    SOFTPLC_SCANNER_DEVICES=/etc/softplc/scanner-devices.conf \
+    SOFTPLC_LOG_LEVEL=info
+
+ENTRYPOINT ["/usr/local/bin/softplc-eip-scanner"]

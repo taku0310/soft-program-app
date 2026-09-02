@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: Apache-2.0
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  # The default configuration: no submodule, no stack, everything still builds
+  # and the whole suite runs. This is the one that must never be allowed to go
+  # red on a fresh clone.
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DSOFTPLC_WITH_OPENER=OFF -DSOFTPLC_WERROR=ON
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Test
+        # The two-process tests need POSIX shm and named semaphores, which the
+        # runner provides through /dev/shm.
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Smoke-run the PLC core
+        run: |
+          SOFTPLC_ADAPTERS=loopback \
+          SOFTPLC_CYCLE_US=1000 \
+          SOFTPLC_MAX_SCANS=500 \
+          ./build/softplc
+
+  # The configuration that actually links OpENer. Kept separate because it
+  # needs the submodule, and because a submodule fetch failure should not be
+  # able to hide a real failure in the job above.
+  # Both real stacks linked: OpENer for the Adapter role, EIPScanner for the
+  # Scanner role. Kept separate from the job above because it needs submodules.
+  build-with-opener:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DSOFTPLC_WITH_OPENER=ON \
+            -DSOFTPLC_WITH_EIPSCANNER=ON \
+            -DSOFTPLC_WERROR=ON
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build the PLC core image
+        run: docker build -f docker/Dockerfile.plc-core -t softplc/core:ci .
+
+      - name: Build the EtherNet/IP adapter image
+        run: docker build -f docker/Dockerfile.eip-adapter -t softplc/eip-adapter:ci .
+
+      - name: Build the EtherNet/IP scanner image
+        run: docker build -f docker/Dockerfile.eip-scanner -t softplc/eip-scanner:ci .
