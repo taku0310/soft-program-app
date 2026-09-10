@@ -1,0 +1,19 @@
+# The build context must not carry git metadata.
+#
+# This is not only hygiene. A submodule's `.git` is a *file* containing
+# `gitdir: ../../.git/modules/...`, a path that points outside the build
+# context and therefore does not exist inside the image. Copied in, it makes
+# git believe third_party/EIPScanner is a repository and then fail to open it,
+# which broke `git apply` in cmake/EIPScanner.cmake with
+#   fatal: not a git repository: /src/third_party/EIPScanner/../../.git/...
+# Excluding it here leaves a plain directory, where git apply works.
+**/.git
+**/.gitmodules
+
+# Build trees and measurement output: large, host-specific, never wanted in an
+# image, and they invalidate the build cache on every local build.
+build/
+build-*/
+cmake-build-*/
+*.o
+*.a

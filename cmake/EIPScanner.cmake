@@ -70,6 +70,16 @@ else()
     RESULT_VARIABLE EIPSCANNER_PATCH_RC
     ERROR_VARIABLE EIPSCANNER_PATCH_ERR)
   if(NOT EIPSCANNER_PATCH_RC EQUAL 0)
+    if(EIPSCANNER_PATCH_ERR MATCHES "not a git repository")
+      # A submodule's .git is a file containing a path to the real gitdir. Copy
+      # the tree somewhere that path does not resolve - a container build
+      # context is the usual way - and git sees a repository it cannot open.
+      message(FATAL_ERROR
+        "Could not apply ${EIPSCANNER_PATCH}:\n${EIPSCANNER_PATCH_ERR}\n"
+        "${EIPSCANNER_ROOT} carries a .git that points outside this tree. In a "
+        "container build, exclude git metadata from the build context - the "
+        "repository's .dockerignore does this; check it was not lost.")
+    endif()
     message(FATAL_ERROR
       "Could not apply ${EIPSCANNER_PATCH}:\n${EIPSCANNER_PATCH_ERR}\n"
       "If the submodule was bumped, check whether upstream fixed this and "
