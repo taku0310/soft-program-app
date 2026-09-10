@@ -30,7 +30,15 @@ endif()
 # failing and this block is the thing to delete.
 #
 # Applying it dirties the submodule working tree - `git status` will show
-# third_party/EIPScanner as modified after a configure. That is expected.
+# third_party/EIPScanner as modified after a configure. That is expected, and
+# it is not something to commit: the file belongs to upstream's repository and
+# the submodule pointer is deliberately left alone.
+#
+# Do not "clean it up" by hand either. This runs at *configure* time only, so
+# reverting the file and then building incrementally recompiles it unpatched
+# without re-running configure and without saying anything - and an unpatched
+# scanner fails in the least visible way there is, by sending 20% slow. If it
+# has been reverted, delete the build directory or re-run cmake.
 # --------------------------------------------------------------------------
 set(EIPSCANNER_PATCH ${CMAKE_CURRENT_SOURCE_DIR}/patches/eipscanner-io-timer.patch)
 
