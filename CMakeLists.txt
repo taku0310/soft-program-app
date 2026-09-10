@@ -13,6 +13,13 @@ option(SOFTPLC_WITH_EIPSCANNER  "Link the real EIPScanner stack into the Scanner
 option(SOFTPLC_BUILD_TESTS  "Build the test suite" ON)
 option(SOFTPLC_WERROR       "Treat warnings as errors" OFF)
 
+# OpENer rounds a requested RPI up to a multiple of its timer tick, so this is
+# a hard floor on the Adapter's production rate. 10 ms serves every RPI this
+# project recommends; 1 ms is needed for sub-10 ms and costs ~2.3 points of CPU
+# in the adapter process. See docs/eip-rpi-evaluation.md.
+set(SOFTPLC_OPENER_TICK_MS 10 CACHE STRING
+    "OpENer timer resolution in ms; also the Adapter's minimum RPI")
+
 add_compile_options(
   -Wall -Wextra -Wpedantic
   -Wshadow -Wcast-qual
@@ -131,7 +138,9 @@ if(SOFTPLC_WITH_EIP)
 
   if(SOFTPLC_WITH_OPENER)
     target_link_libraries(softplc-eip-adapter PRIVATE opener)
-    target_compile_definitions(softplc-eip-adapter PRIVATE SOFTPLC_WITH_OPENER=1)
+    target_compile_definitions(softplc-eip-adapter PRIVATE
+      SOFTPLC_WITH_OPENER=1
+      SOFTPLC_OPENER_TICK_MS=${SOFTPLC_OPENER_TICK_MS})
     # The backend includes OpENer's headers, which predate some of the
     # warnings this project enables.  Relax only the ones upstream trips, and
     # only for the file that includes them.
@@ -217,6 +226,7 @@ endif()
 message(STATUS "soft-program-app ${PROJECT_VERSION}")
 message(STATUS "  EtherNet/IP adapter : ${SOFTPLC_WITH_EIP}")
 message(STATUS "  OpENer stack linked : ${SOFTPLC_WITH_OPENER}")
+message(STATUS "  OpENer timer tick   : ${SOFTPLC_OPENER_TICK_MS} ms (Adapter min RPI)")
 message(STATUS "  EtherNet/IP scanner : ${SOFTPLC_WITH_EIP_SCANNER}")
 message(STATUS "  EIPScanner linked   : ${SOFTPLC_WITH_EIPSCANNER}")
 message(STATUS "  tests               : ${SOFTPLC_BUILD_TESTS}")

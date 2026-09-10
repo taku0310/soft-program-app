@@ -20,6 +20,45 @@ if(NOT EXISTS ${EIPSCANNER_ROOT}/src/ConnectionManager.h)
     "adapter with its mirror backend.")
 endif()
 
+# --------------------------------------------------------------------------
+# Vendored fix, applied to the submodule working tree at configure time.
+#
+# IOConnection's send timer loses real time twice over, which showed up as an
+# O->T period of 11 982 us against a 10 ms RPI (docs/eip-rpi-evaluation.md).
+# It is carried as a patch rather than a fork because a submodule bump should
+# stay a pointer change; if upstream fixes it, `git apply --check` starts
+# failing and this block is the thing to delete.
+#
+# Applying it dirties the submodule working tree - `git status` will show
+# third_party/EIPScanner as modified after a configure. That is expected.
+# --------------------------------------------------------------------------
+set(EIPSCANNER_PATCH ${CMAKE_CURRENT_SOURCE_DIR}/patches/eipscanner-io-timer.patch)
+
+# Idempotent: a patch that is already applied reverses cleanly, and configuring
+# twice must not fail.
+execute_process(
+  COMMAND git apply --reverse --check ${EIPSCANNER_PATCH}
+  WORKING_DIRECTORY ${EIPSCANNER_ROOT}
+  RESULT_VARIABLE EIPSCANNER_PATCH_PRESENT
+  OUTPUT_QUIET ERROR_QUIET)
+
+if(EIPSCANNER_PATCH_PRESENT EQUAL 0)
+  message(STATUS "  EIPScanner patch    : already applied")
+else()
+  execute_process(
+    COMMAND git apply ${EIPSCANNER_PATCH}
+    WORKING_DIRECTORY ${EIPSCANNER_ROOT}
+    RESULT_VARIABLE EIPSCANNER_PATCH_RC
+    ERROR_VARIABLE EIPSCANNER_PATCH_ERR)
+  if(NOT EIPSCANNER_PATCH_RC EQUAL 0)
+    message(FATAL_ERROR
+      "Could not apply ${EIPSCANNER_PATCH}:\n${EIPSCANNER_PATCH_ERR}\n"
+      "If the submodule was bumped, check whether upstream fixed this and "
+      "delete the patch, or refresh it against the new revision.")
+  endif()
+  message(STATUS "  EIPScanner patch    : applied")
+endif()
+
 # Upstream's options, forced off: we want the library and nothing else.
 set(TEST_ENABLED    OFF CACHE BOOL "" FORCE)
 set(EXAMPLE_ENABLED OFF CACHE BOOL "" FORCE)

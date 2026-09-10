@@ -196,9 +196,28 @@
  */
 #define OPENER_NUMBER_OF_SUPPORTED_SESSIONS 20
 
-/** @brief The time in ms of the timer used in this implementations, time base for time-outs and production timers
+/**
+ * @brief Timer resolution: the time base for OpENer's time-outs and, more
+ *        importantly here, for its production timer.
+ *
+ * This is not a free parameter. `ConnectionObjectSetExpectedPacketRate()`
+ * rounds a requested RPI **up** to a multiple of this value, so it is a hard
+ * floor on how fast this Adapter can produce. At 10 ms a scanner asking for a
+ * 5 ms RPI is served at 10 ms - measured on the wire at 10 168 us - and gets
+ * no error saying so.
+ *
+ * 10 ms is kept as the default because it costs the least and every RPI this
+ * project recommends is a multiple of it (docs/eip-rpi-evaluation.md). Set
+ * SOFTPLC_OPENER_TICK_MS=1 to serve sub-10 ms RPIs; measured, that turns a
+ * 5 ms request from 10 603 us into 5 011 us and doubles the delivered frame
+ * count, at a cost of roughly 2.3 points of CPU in this process - 1.00% to
+ * 3.32% at a 50 ms RPI, where it buys nothing at all. Choose it for the RPI
+ * actually in use.
  */
-static const MilliSeconds kOpenerTimerTickInMilliSeconds = 10;
+#ifndef SOFTPLC_OPENER_TICK_MS
+#define SOFTPLC_OPENER_TICK_MS 10
+#endif
+static const MilliSeconds kOpenerTimerTickInMilliSeconds = SOFTPLC_OPENER_TICK_MS;
 
 /*
  * Omit assertion definitions when building unit tests. These will

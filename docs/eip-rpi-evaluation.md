@@ -353,7 +353,83 @@ In order of what actually limits the achievable RPI:
 Note the ordering: even with both defects fixed, item 1 remains, and it is the
 reason a 5 ms RPI is not a realistic target on this class of machine.
 
-## 12. What could not be measured
+## 12. Fixing the two defects — measured, not proposed
+
+Both were fixed and the same conditions re-measured. `SOFTPLC_OPENER_TICK_MS=1`
+plus `patches/eipscanner-io-timer.patch`.
+
+### The cadence is fully repaired
+
+10 minutes, idle. Three variants, so the two scanner-side changes can be told
+apart:
+
+| RPI | dir | baseline | tick fix + µs fix | **+ overshoot fix** | target |
+|---|---|---|---|---|---|
+| 5 ms | T→O | 10 603 µs | **5 007 µs** | 5 011 µs | 5 000 |
+| 5 ms | O→T | 6 207 µs | 6 053 µs | **5 001 µs** | 5 000 |
+| 10 ms | T→O | 10 190 µs | **10 011 µs** | 10 011 µs | 10 000 |
+| 10 ms | O→T | 11 982 µs | 12 042 µs | **10 002 µs** | 10 000 |
+| 50 ms | T→O | 50 002 µs | 50 000 µs | — | 50 000 |
+| 50 ms | O→T | 53 236 µs | 52 012 µs | — | 50 000 |
+
+Frames delivered against the configured RPI went from 49.15 % / 84.11 % to
+**99.79 % / 99.98 %** at a 5 ms RPI.
+
+**The first hypothesis was wrong and the measurement is what caught it.** The
+millisecond truncation (§8.2) is real, but fixing it alone left the 10 ms O→T
+period at 12 042 µs — no better than the 11 982 µs baseline. The dominant error
+was a second defect in the same function: `_o2tTimer = 0` on send, discarding
+the overshoot past the deadline instead of subtracting the period, so the mean
+period was `RPI + mean overshoot`. Changing it to `_o2tTimer -= _o2tAPI` is what
+moved 11 982 µs to 10 002 µs.
+
+The truncation fix is kept regardless: it also governs `_connectionTimeoutCount`,
+so without it the configured connection timeout is not the one in effect.
+
+### The connection still drops at 5 ms
+
+1 hour, idle, RPI 5 ms:
+
+| | baseline | all three fixes |
+|---|---|---|
+| T→O packets | 352 519 | **717 652** |
+| T→O mean period | 10 187 µs | **5 009 µs** |
+| O→T mean period | 5 946 µs | **5 002 µs** |
+| UDP packets lost | 0 | 0 |
+| **CIP connection timeouts** | **6** | **3** |
+| Reconnects | 6 | 3 |
+| Connection lifetimes | 82, 28, 1078, 208, 1468, 718, 5 s | 632, 1438, 993, 530 s |
+| **Availability** | **99.66 %** | **99.83 %** |
+| Total outage | 12.4 s | 6.2 s |
+
+Halved, not eliminated. This is the expected result and it is worth stating
+plainly: **the fixes repair cadence, not stall tolerance.** The CIP budget at a
+5 ms RPI is still 80 ms, and this host still stalls past 80 ms — the worst
+silence in the fixed run was 116 436 µs. The drop rate roughly halved because
+T→O now arrives twice as often, so a stall must cover twice as many expected
+frames before the timeout counter expires; the stalls themselves are unchanged.
+
+**So the recommendation in §11 does not change.** 10 ms remains the smallest
+RPI that can be recommended on this hardware. What the fixes change is that a
+requested RPI is now actually served: before them, configuring 10 ms produced
+output at 11.98 ms and configuring 5 ms produced it at 10 ms.
+
+### Cost, and why the tick is an option rather than a new default
+
+`SOFTPLC_OPENER_TICK_MS=1` runs OpENer's connection manager ten times as often:
+
+| RPI | tick 10 ms | tick 1 ms |
+|---|---|---|
+| 5 ms | 1.82 % | 4.29 % |
+| 10 ms | 1.54 % | 3.82 % |
+| 50 ms | 1.00 % | 3.32 % |
+
+At a 50 ms RPI that is 2.3 points of CPU for nothing at all — the RPI is
+already an exact multiple of the 10 ms tick. The default therefore stays at
+10 ms, and the option exists for deployments that need sub-10 ms and have
+accepted what §11 says about them.
+
+## 13. What could not be measured
 
 * **8–24 hour runs.** The longest completed run is 1 hour per RPI. The session
   container is reclaimed on inactivity, so multi-hour runs could not be
