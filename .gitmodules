@@ -4,3 +4,4 @@
 [submodule "third_party/EIPScanner"]
 	path = third_party/EIPScanner
 	url = https://github.com/nimbuscontrols/EIPScanner.git
+	ignore = dirty
