@@ -75,10 +75,14 @@ cat > "$W/devA.conf" <<EOF
 10.10.0.1     151 150 100 $IMG    $IMG    $RPI_US  $TMO_MULT hold
 EOF
 
-# Scans are sized to outlast the measurement window by a wide margin: whichever
-# PLC exits first takes its stack down and would end the other's connection
-# inside the window.
-SCANS=$(( (SECS + 180) * 1000000 / SCAN_US ))
+# Sized to run out shortly *after* the probe, not to be killed. Whichever PLC
+# exits first takes its stack down, so it must not happen inside the window -
+# but it must happen, because the per-scan IPC totals (exchanges, timeouts,
+# max RTT) are only printed when the core finishes. Killing it, as an earlier
+# version did, threw away the one measurement that separates a slow stack from
+# a slow IPC leg.
+SETTLE=45
+SCANS=$(( (SECS + SETTLE) * 1000000 / SCAN_US ))
 
 log "RPI=${RPI_US}us  budget=${BUDGET_US}us  secs=${SECS}  load=${LOAD}  label=${LABEL}"
 
@@ -140,13 +144,24 @@ log "probe finished"
 
 wait $SAMPLER 2>/dev/null
 
+# Let both cores run out their scan count so they print their IPC summaries.
+log "waiting for the PLC cores to finish and report"
+for i in $(seq 1 60); do
+  grep -q "exchanges=" "$OUT/plcA-core.log" 2>/dev/null \
+    && grep -q "exchanges=" "$OUT/plcB-core.log" 2>/dev/null && break
+  sleep 1
+done
+grep -q "exchanges=" "$OUT/plcB-core.log" 2>/dev/null \
+  || log "WARNING: no IPC summary from the scanner-side core"
+
 # --- collect -------------------------------------------------------------
 {
   echo "label=$LABEL rpi_us=$RPI_US seconds=$SECS load=$LOAD"
   echo "tmo_mult=$TMO_MULT budget_us=$BUDGET_US scan_us=$SCAN_US img_bytes=$IMG"
   echo "ncpu=$NCPU kernel=$(uname -r)"
   echo "forward_open_count=$(grep -c 'Open IO connection' "$OUT/plcB-stack.log" 2>/dev/null)"
-  echo "conn_closed_count=$(grep -ci 'close\|timeout\|lost' "$OUT/plcB-stack.log" 2>/dev/null)"
+  echo "closed_by_timeout=$(grep -c 'is closed by timeout' "$OUT/plcB-stack.log" 2>/dev/null)"
+  echo "conn_closed_count=$(grep -c 'connection to .* closed' "$OUT/plcB-stack.log" 2>/dev/null)"
 } > "$OUT/meta.txt"
 
 ip netns exec plcA cat /proc/net/snmp > "$OUT/plcA-snmp.txt" 2>/dev/null

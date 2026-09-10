@@ -111,7 +111,13 @@ def load(run_dir):
     r["coreA"] = parse_core(os.path.join(run_dir, "plcA-core.log"))
     r["coreB"] = parse_core(os.path.join(run_dir, "plcB-core.log"))
     r["res"] = parse_resources(os.path.join(run_dir, "resources.csv"))
-    r["forward_opens"] = int(r["meta"].get("forward_open_count", 0) or 0)
+    # Counted from the scanner's own log rather than from meta.txt: meta is
+    # written at the end of a run, so a run that was interrupted has none, and
+    # defaulting the ForwardOpen count to zero would hide a reconnect.
+    log = os.path.join(run_dir, "plcB-stack.log")
+    txt = open(log).read() if os.path.exists(log) else ""
+    r["forward_opens"] = txt.count("Open IO connection")
+    r["closed_by_timeout"] = txt.count("is closed by timeout")
     return r
 
 def agg(conns, key, how="sum"):
@@ -124,7 +130,7 @@ def main():
     dirs = sorted(sys.argv[1:])
     print(f"{'run':26s} {'dir':5s} {'pkts':>8s} {'exp':>8s} {'deliv%':>7s} "
           f"{'mean':>8s} {'p50':>7s} {'p95':>7s} {'p99':>7s} {'p99.9':>8s} "
-          f"{'max':>8s} {'sd':>7s} {'lost':>5s} {'>bud':>5s} {'cons':>5s} {'FO':>3s}")
+          f"{'max':>8s} {'sd':>7s} {'lost':>5s} {'>bud':>5s} {'cons':>5s} {'FO':>3s} {'CTO':>4s}")
     for d in dirs:
         r = load(d)
         for lbl, conns in (("T->O", r["t2o"]), ("O->T", r["o2t"])):
@@ -140,7 +146,7 @@ def main():
                   f"{agg(conns,'p999','max'):8d} {agg(conns,'max','max'):8d} "
                   f"{agg(conns,'sd','max'):7.0f} {agg(conns,'seq_lost'):5d} "
                   f"{agg(conns,'over_tmo'):5d} {agg(conns,'maxcons','max'):5d} "
-                  f"{r['forward_opens']:3d}")
+                  f"{r['forward_opens']:3d} {r['closed_by_timeout']:4d}")
 
 if __name__ == "__main__":
     main()
