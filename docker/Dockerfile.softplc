@@ -21,7 +21,7 @@
 FROM debian:bookworm-slim AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake ca-certificates \
+        build-essential cmake ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -33,6 +33,9 @@ COPY examples     ./examples
 COPY tests        ./tests
 COPY tools        ./tools
 COPY third_party  ./third_party
+# Needed by cmake/EIPScanner.cmake, which patches the vendored stack at
+# configure time. Without it the configure fails, not the build.
+COPY patches      ./patches
 
 # Fail loudly rather than silently falling back to a stack-free backend: an
 # image built from missing submodules would come up, serve nothing, and look

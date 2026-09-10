@@ -34,10 +34,29 @@ endif()
 # --------------------------------------------------------------------------
 set(EIPSCANNER_PATCH ${CMAKE_CURRENT_SOURCE_DIR}/patches/eipscanner-io-timer.patch)
 
+if(NOT EXISTS ${EIPSCANNER_PATCH})
+  message(FATAL_ERROR
+    "Missing ${EIPSCANNER_PATCH}.\n"
+    "Building the Scanner needs the patches/ directory. In a container build "
+    "that means `COPY patches ./patches` in the Dockerfile - see the note in "
+    "the top-level CMakeLists.txt.")
+endif()
+
+# git apply works outside a git repository, which matters: in a container build
+# third_party/EIPScanner arrives as plain files with no .git.  The binary does
+# have to exist, though, and a slim build image has no reason to carry it.
+find_package(Git QUIET)
+if(NOT Git_FOUND)
+  message(FATAL_ERROR
+    "git is required to apply ${EIPSCANNER_PATCH} and was not found.\n"
+    "Install it in the build environment (in a container build, add git to the "
+    "builder stage's apt-get install line).")
+endif()
+
 # Idempotent: a patch that is already applied reverses cleanly, and configuring
 # twice must not fail.
 execute_process(
-  COMMAND git apply --reverse --check ${EIPSCANNER_PATCH}
+  COMMAND ${GIT_EXECUTABLE} apply --reverse --check ${EIPSCANNER_PATCH}
   WORKING_DIRECTORY ${EIPSCANNER_ROOT}
   RESULT_VARIABLE EIPSCANNER_PATCH_PRESENT
   OUTPUT_QUIET ERROR_QUIET)
@@ -46,7 +65,7 @@ if(EIPSCANNER_PATCH_PRESENT EQUAL 0)
   message(STATUS "  EIPScanner patch    : already applied")
 else()
   execute_process(
-    COMMAND git apply ${EIPSCANNER_PATCH}
+    COMMAND ${GIT_EXECUTABLE} apply ${EIPSCANNER_PATCH}
     WORKING_DIRECTORY ${EIPSCANNER_ROOT}
     RESULT_VARIABLE EIPSCANNER_PATCH_RC
     ERROR_VARIABLE EIPSCANNER_PATCH_ERR)
