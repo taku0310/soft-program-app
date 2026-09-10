@@ -200,6 +200,12 @@ if(SOFTPLC_BUILD_TESTS AND SOFTPLC_WITH_EIP)
     add_executable(e2e_two_plc tools/e2e_two_plc.c)
     target_link_libraries(e2e_two_plc PRIVATE ${SOFTPLC_ADAPTERS_LINK})
   endif()
+
+  # Wire-level measurement. Links nothing from this project on purpose: it has
+  # to be able to contradict the processes it is watching, so it shares no code
+  # with them and reads only what left the interface.
+  add_executable(eip_probe tools/eip_probe.c)
+  target_link_libraries(eip_probe PRIVATE m)
 endif()
 
 # --------------------------------------------------------------------------
