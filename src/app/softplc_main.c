@@ -3,21 +3,28 @@
  * @file softplc_main.c
  * @brief The PLC core process.
  *
- * Builds a runtime from the environment, asks the registry for whichever
- * protocol adapters were configured, binds them into the process image, loads
- * the demo program and scans.
+ * Builds a runtime from its configuration, asks the registry for whichever
+ * protocol adapters that names, binds them into the process image, loads the
+ * demo program and scans.
  *
- * Configuration is environment-driven because the deployment unit is a
- * container: everything here is settable through `docker run -e` or a
- * Kubernetes env block, with no config file to mount.
+ * Settings come from the environment first and a config file underneath it
+ * (see plc_config.h); everything below is settable either way, so a container
+ * can be driven entirely by `docker run -e` or entirely by a mounted
+ * `softplc.conf`.
  *
+ *   SOFTPLC_ROLE              none | adapter | scanner         none
  *   SOFTPLC_INSTANCE          namespace for IPC objects        (default)
- *   SOFTPLC_ADAPTERS          comma-separated protocols        loopback
+ *   SOFTPLC_ADAPTERS          comma-separated protocols        (from the role)
  *   SOFTPLC_CYCLE_US          task period in microseconds      10000
  *   SOFTPLC_FAILSAFE          hold | clear                     hold
  *   SOFTPLC_MAX_SCANS         stop after N scans, 0 = forever  0
  *   SOFTPLC_EIP_*             see eip_shm_layout.h
  *   SOFTPLC_LOG_LEVEL         error | warn | info | debug      info
+ *
+ * `role` is the setting a single-container deployment turns: it picks the
+ * adapter the core binds *and*, read back through `--role`, tells the
+ * entrypoint which stack process to run beside it.  Both come from one value
+ * so the two halves cannot be configured to disagree.
  */
 #include <signal.h>
 #include <stdio.h>
@@ -26,6 +33,7 @@
 
 #include "demo_program.h"
 #include "softplc/adapter_registry.h"
+#include "softplc/plc_config.h"
 #include "softplc/plc_log.h"
 #include "softplc/plc_runtime.h"
 
@@ -40,19 +48,6 @@ static void on_signal(int sig) {
     if (g_rt) plc_runtime_request_stop(g_rt);
 }
 
-static const char *env_str(const char *key, const char *fallback) {
-    const char *v = getenv(key);
-    return (v && *v) ? v : fallback;
-}
-
-static uint32_t env_u32(const char *key, uint32_t fallback) {
-    const char *v = getenv(key);
-    if (!v || !*v) return fallback;
-    char *end = NULL;
-    unsigned long n = strtoul(v, &end, 10);
-    return (end == v) ? fallback : (uint32_t)n;
-}
-
 static void list_adapters(void) {
     printf("available protocol adapters:\n");
     for (size_t i = 0; i < plc_adapter_registry_count(); ++i) {
@@ -61,28 +56,117 @@ static void list_adapters(void) {
     }
 }
 
+static void list_roles(void) {
+    printf("available roles:\n");
+    for (size_t i = 0; ; ++i) {
+        const char *role = plc_adapter_role_at(i);
+        if (!role) break;
+        printf("  %-10s %s\n", role, plc_adapter_role_adapters(role));
+    }
+}
+
+/**
+ * Dump what the file said and what each setting actually resolved to.
+ *
+ * The question this answers is the one that costs an afternoon otherwise:
+ * "did my config file take effect, or is something in the environment still
+ * winning?"  So every entry says where its value came from.
+ */
+static void show_config(void) {
+    if (plc_config_count()) {
+        printf("config file: %s\n", plc_config_path());
+        for (size_t i = 0; i < plc_config_count(); ++i) {
+            const char *key = NULL, *value = NULL;
+            plc_config_entry_at(i, &key, &value);
+            const char *effective = plc_cfg_str(key, value);
+            printf("  %-32s = %s%s\n", key, value,
+                   (strcmp(effective, value) == 0)
+                       ? "" : "   (overridden by the environment)");
+        }
+    } else {
+        printf("config file: none (%s absent and SOFTPLC_CONFIG unset)\n",
+               PLC_CONFIG_DEFAULT_PATH);
+    }
+
+    const char *role = plc_cfg_str("SOFTPLC_ROLE", "none");
+    const char *from_role = plc_adapter_role_adapters(role);
+    printf("resolved:\n");
+    printf("  %-32s = %s%s\n", "SOFTPLC_ROLE", role,
+           from_role ? "" : "   *** unknown role ***");
+    printf("  %-32s = %s\n", "SOFTPLC_ADAPTERS",
+           plc_cfg_str("SOFTPLC_ADAPTERS", from_role ? from_role : "?"));
+    printf("  %-32s = %s\n", "SOFTPLC_INSTANCE",
+           plc_cfg_str("SOFTPLC_INSTANCE", "default"));
+    printf("  %-32s = %u\n", "SOFTPLC_CYCLE_US",
+           plc_cfg_u32("SOFTPLC_CYCLE_US", 10000));
+    printf("  %-32s = %s\n", "SOFTPLC_FAILSAFE",
+           plc_cfg_str("SOFTPLC_FAILSAFE", "hold"));
+}
+
 typedef struct opened_adapter {
     const plc_adapter_factory_t *factory;
     plc_protocol_adapter_t      *adapter;
 } opened_adapter_t;
 
 int main(int argc, char **argv) {
-    plc_log_init("softplc");
+    if (plc_config_bootstrap("softplc") != 0) return EXIT_FAILURE;
     plc_adapter_register_builtins();
 
-    if (argc > 1 && strcmp(argv[1], "--list-adapters") == 0) {
-        list_adapters();
-        return EXIT_SUCCESS;
+    /* --- resolve the role ----------------------------------------------- */
+
+    const char *role = plc_cfg_str("SOFTPLC_ROLE", "none");
+    const char *role_adapters = plc_adapter_role_adapters(role);
+
+    if (argc > 1) {
+        if (strcmp(argv[1], "--list-adapters") == 0) {
+            list_adapters();
+            return EXIT_SUCCESS;
+        }
+        if (strcmp(argv[1], "--list-roles") == 0) {
+            list_roles();
+            return EXIT_SUCCESS;
+        }
+        if (strcmp(argv[1], "--show-config") == 0) {
+            show_config();
+            return EXIT_SUCCESS;
+        }
+        if (strcmp(argv[1], "--print-config") == 0) {
+            if (argc < 3) {
+                fprintf(stderr, "usage: softplc --print-config KEY\n");
+                return EXIT_FAILURE;
+            }
+            printf("%s\n", plc_cfg_str(argv[2], ""));
+            return EXIT_SUCCESS;
+        }
+        /* The entrypoint's single source of truth for which stack process to
+         * start.  It validates here, in the binary that owns the role table,
+         * so an unknown role fails before anything is launched rather than
+         * leaving a core scanning next to no stack at all. */
+        if (strcmp(argv[1], "--role") == 0) {
+            if (!role_adapters) {
+                fprintf(stderr, "unknown role '%s'\n", role);
+                list_roles();
+                return EXIT_FAILURE;
+            }
+            printf("%s\n", role);
+            return EXIT_SUCCESS;
+        }
     }
 
-    const char *instance = env_str("SOFTPLC_INSTANCE", "default");
-    const char *failsafe = env_str("SOFTPLC_FAILSAFE", "hold");
+    if (!role_adapters) {
+        PLC_LOG_ERR("unknown role '%s'", role);
+        list_roles();
+        return EXIT_FAILURE;
+    }
+
+    const char *instance = plc_cfg_str("SOFTPLC_INSTANCE", "default");
+    const char *failsafe = plc_cfg_str("SOFTPLC_FAILSAFE", "hold");
     const plc_failsafe_policy_t policy =
         (strcmp(failsafe, "clear") == 0) ? PLC_FAILSAFE_CLEAR : PLC_FAILSAFE_HOLD;
 
     plc_runtime_config_t rc;
     plc_runtime_config_init(&rc);
-    rc.cycle_us = env_u32("SOFTPLC_CYCLE_US", rc.cycle_us);
+    rc.cycle_us = plc_cfg_u32("SOFTPLC_CYCLE_US", rc.cycle_us);
 
     g_rt = plc_runtime_create(&rc);
     if (!g_rt) {
@@ -96,8 +180,22 @@ int main(int argc, char **argv) {
     size_t opened_count = 0;
     size_t i_offset = 0, q_offset = 0;
 
+    /* The role already names an adapter list.  An explicit SOFTPLC_ADAPTERS
+     * still overrides it, because a deployment that genuinely wants two
+     * protocols bound at once has no other way to say so - but when both are
+     * set and they disagree, say so: the role still decides which stack
+     * process runs beside this one, and a silent mismatch there is a core
+     * scanning against a peer that is not there. */
+    const char *explicit_list = plc_cfg_str("SOFTPLC_ADAPTERS", NULL);
+    if (explicit_list && plc_cfg_str("SOFTPLC_ROLE", NULL) &&
+        strcmp(explicit_list, role_adapters) != 0) {
+        PLC_LOG_WARN("role '%s' implies adapters '%s' but SOFTPLC_ADAPTERS is "
+                     "'%s'; the list wins here, the role still picks the stack "
+                     "process", role, role_adapters, explicit_list);
+    }
+
     char list[256];
-    snprintf(list, sizeof(list), "%s", env_str("SOFTPLC_ADAPTERS", "loopback"));
+    snprintf(list, sizeof(list), "%s", explicit_list ? explicit_list : role_adapters);
 
     for (char *save = NULL, *tok = strtok_r(list, ",", &save);
          tok && opened_count < MAX_ADAPTERS;
@@ -161,11 +259,13 @@ int main(int argc, char **argv) {
     sigaction(SIGINT,  &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
-    PLC_LOG_INFO("instance '%s': %zu adapter(s), %u us cycle, failsafe=%s",
-                 instance, opened_count, rc.cycle_us,
-                 policy == PLC_FAILSAFE_CLEAR ? "CLEAR" : "HOLD");
+    PLC_LOG_INFO("instance '%s': role=%s, %zu adapter(s), %u us cycle, "
+                 "failsafe=%s, config from %s",
+                 instance, role, opened_count, rc.cycle_us,
+                 policy == PLC_FAILSAFE_CLEAR ? "CLEAR" : "HOLD",
+                 plc_config_source());
 
-    const uint64_t max_scans = env_u32("SOFTPLC_MAX_SCANS", 0);
+    const uint64_t max_scans = plc_cfg_u32("SOFTPLC_MAX_SCANS", 0);
     const plc_status_t run_st = plc_runtime_run(g_rt, max_scans);
 
     plc_runtime_stats_t rs;

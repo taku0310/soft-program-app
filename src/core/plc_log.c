@@ -1,9 +1,10 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "softplc/plc_log.h"
 
+#include "softplc/plc_config.h"
+
 #include <stdarg.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -24,12 +25,16 @@ void plc_log_init(const char *component) {
     if (component) {
         snprintf(g_component, sizeof(g_component), "%s", component);
     }
-    const char *env = getenv("SOFTPLC_LOG_LEVEL");
-    if (!env) return;
-    if      (strcmp(env, "error") == 0) g_level = PLC_LOG_LEVEL_ERROR;
-    else if (strcmp(env, "warn")  == 0) g_level = PLC_LOG_LEVEL_WARN;
-    else if (strcmp(env, "info")  == 0) g_level = PLC_LOG_LEVEL_INFO;
-    else if (strcmp(env, "debug") == 0) g_level = PLC_LOG_LEVEL_DEBUG;
+    /* Config file as well as environment, so a level set for a whole machine
+     * does not have to be repeated in every service block.  Callers that want
+     * the file consulted load it before calling here; when they have not, this
+     * degrades to reading SOFTPLC_LOG_LEVEL exactly as it always did. */
+    const char *level = plc_cfg_str("SOFTPLC_LOG_LEVEL", NULL);
+    if (!level) return;
+    if      (strcmp(level, "error") == 0) g_level = PLC_LOG_LEVEL_ERROR;
+    else if (strcmp(level, "warn")  == 0) g_level = PLC_LOG_LEVEL_WARN;
+    else if (strcmp(level, "info")  == 0) g_level = PLC_LOG_LEVEL_INFO;
+    else if (strcmp(level, "debug") == 0) g_level = PLC_LOG_LEVEL_DEBUG;
 }
 
 void plc_log_write(plc_log_level_t level, const char *fmt, ...) {

@@ -38,6 +38,7 @@ find_package(Threads REQUIRED)
 # --------------------------------------------------------------------------
 add_library(softplc_core STATIC
   src/core/plc_types.c
+  src/core/plc_config.c
   src/core/plc_log.c
   src/core/process_image.c
   src/core/std_fb.c

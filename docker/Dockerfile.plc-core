@@ -49,10 +49,13 @@ COPY --from=build /src/build/softplc /usr/local/bin/softplc
 VOLUME ["/dev/shm"]
 
 USER 10001
-ENV SOFTPLC_INSTANCE=default \
-    SOFTPLC_ADAPTERS=loopback \
-    SOFTPLC_CYCLE_US=10000 \
-    SOFTPLC_FAILSAFE=hold \
-    SOFTPLC_LOG_LEVEL=info
+
+# No SOFTPLC_* defaults are set here, deliberately.
+#
+# The environment wins over a mounted config file - which is what makes
+# `docker run -e` and a compose `environment:` block work - so a default baked
+# in here would not be a default at all: it would silently override whatever
+# the operator wrote in /etc/softplc/softplc.conf.  The binary's own defaults
+# are the same values, and `softplc --show-config` prints them.
 
 ENTRYPOINT ["/usr/local/bin/softplc"]

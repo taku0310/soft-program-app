@@ -14,6 +14,7 @@
  * Compiled as C++ rather than C purely so that the two backends present the
  * same translation-unit shape to the build; it uses nothing that needs it.
  */
+#include "softplc/plc_config.h"
 #include "eip_scanner_backend.h"
 #include "eip_scanner_shm_layout_public.h"
 
@@ -39,7 +40,7 @@ plc_status_t mirror_init(const eip_scanner_config_t *cfg) {
     g_losses = 0;
 
     g_forced_down = 0;
-    if (const char *v = std::getenv("SOFTPLC_SCANNER_MIRROR_DOWN")) {
+    if (const char *v = plc_cfg_str("SOFTPLC_SCANNER_MIRROR_DOWN", nullptr)) {
         g_forced_down = (uint32_t)std::strtoul(v, nullptr, 0);
     }
     return PLC_OK;

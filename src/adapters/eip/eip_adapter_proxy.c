@@ -33,6 +33,7 @@
 
 #include "softplc/adapter_registry.h"
 #include "softplc/ipc/shm.h"
+#include "softplc/plc_config.h"
 #include "softplc/plc_log.h"
 #include "softplc/protocol_adapter.h"
 
@@ -56,15 +57,6 @@ typedef struct eip_proxy {
 
     plc_ipc_frame_t scratch;   /* pre-allocated: exchange() must not malloc */
 } eip_proxy_t;
-
-static uint32_t env_u32(const char *key, uint32_t fallback) {
-    const char *v = getenv(key);
-    if (!v || !*v) return fallback;
-    char *end = NULL;
-    unsigned long n = strtoul(v, &end, 10);
-    if (end == v || n == 0 || n > 0xFFFFFFFFul) return fallback;
-    return (uint32_t)n;
-}
 
 /* --- lifecycle ----------------------------------------------------------- */
 
@@ -90,10 +82,10 @@ static plc_status_t proxy_open(plc_protocol_adapter_t *self,
 
     const uint32_t in  = cfg->input_bytes
         ? cfg->input_bytes
-        : env_u32("SOFTPLC_EIP_INPUT_BYTES", EIP_DEFAULT_INPUT_BYTES);
+        : plc_cfg_u32("SOFTPLC_EIP_INPUT_BYTES", EIP_DEFAULT_INPUT_BYTES);
     const uint32_t out = cfg->output_bytes
         ? cfg->output_bytes
-        : env_u32("SOFTPLC_EIP_OUTPUT_BYTES", EIP_DEFAULT_OUTPUT_BYTES);
+        : plc_cfg_u32("SOFTPLC_EIP_OUTPUT_BYTES", EIP_DEFAULT_OUTPUT_BYTES);
     if (in > PLC_IPC_MAX_FRAME_BYTES || out > PLC_IPC_MAX_FRAME_BYTES) {
         PLC_LOG_ERR("eip: image %u/%u exceeds frame limit %u",
                     in, out, (unsigned)PLC_IPC_MAX_FRAME_BYTES);
@@ -113,10 +105,10 @@ static plc_status_t proxy_open(plc_protocol_adapter_t *self,
     p->map->layout_bytes      = (uint32_t)sizeof(eip_shm_t);
     p->map->output_bytes      = out;
     p->map->input_bytes       = in;
-    p->map->produced_assembly = env_u32("SOFTPLC_EIP_PRODUCED_ASSEMBLY",
-                                        EIP_DEFAULT_PRODUCED_ASSEMBLY);
-    p->map->consumed_assembly = env_u32("SOFTPLC_EIP_CONSUMED_ASSEMBLY",
-                                        EIP_DEFAULT_CONSUMED_ASSEMBLY);
+    p->map->produced_assembly = plc_cfg_u32("SOFTPLC_EIP_PRODUCED_ASSEMBLY",
+                                            EIP_DEFAULT_PRODUCED_ASSEMBLY);
+    p->map->consumed_assembly = plc_cfg_u32("SOFTPLC_EIP_CONSUMED_ASSEMBLY",
+                                            EIP_DEFAULT_CONSUMED_ASSEMBLY);
     plc_spsc_init(&p->map->req);
     plc_spsc_init(&p->map->rsp);
     atomic_store(&p->map->status.adapter_state, PLC_ADAPTER_CLOSED);
@@ -144,10 +136,10 @@ static plc_status_t proxy_open(plc_protocol_adapter_t *self,
     c->failsafe_policy = cfg->failsafe_policy;
     c->exchange_timeout_us = cfg->exchange_timeout_us
         ? cfg->exchange_timeout_us
-        : env_u32("SOFTPLC_EIP_EXCHANGE_TIMEOUT_US", EIP_DEFAULT_EXCHANGE_TIMEOUT_US);
+        : plc_cfg_u32("SOFTPLC_EIP_EXCHANGE_TIMEOUT_US", EIP_DEFAULT_EXCHANGE_TIMEOUT_US);
     c->failsafe_timeout_us = cfg->failsafe_timeout_us
         ? cfg->failsafe_timeout_us
-        : env_u32("SOFTPLC_EIP_FAILSAFE_TIMEOUT_US", EIP_DEFAULT_FAILSAFE_TIMEOUT_US);
+        : plc_cfg_u32("SOFTPLC_EIP_FAILSAFE_TIMEOUT_US", EIP_DEFAULT_FAILSAFE_TIMEOUT_US);
     c->flags = PLC_ADAPTER_CAP_OUT_OF_PROCESS;
     c->point_override_capacity = 0;   /* reserved; see protocol_adapter.h */
 

@@ -37,8 +37,14 @@ Consequences:
 * The core needs no `fork`, no `SIGCHLD` handler, no backoff state machine.
 * The adapter exits non-zero on a fatal error rather than retrying, so a
   supervisor sees a clean signal.
-* Deployments **must** configure a restart policy; nothing in this repository
+* Deployments **must** configure a restart policy; nothing in the PLC core
   will notice that an adapter has stayed dead.
+* One place in the repository *is* a supervisor, and is not an exception to
+  this: when the core and a stack share a container, `docker/entrypoint.sh` is
+  the supervisor this ADR defers to, so restarting the stack is its job
+  ([ADR 0010](0010-single-container-role-switch.md)). It restarts nothing else
+  — a core exit takes the container down for the orchestrator to handle — and
+  it reconciles no state, so both decisions above stand as written.
 * Applications that need state recovered across a reconnect must implement it
   in POU logic, where the plant semantics are known. `plc_adapter_state()` and
   the adapter statistics expose everything needed to detect the transition.

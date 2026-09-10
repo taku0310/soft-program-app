@@ -33,6 +33,30 @@ jobs:
           SOFTPLC_MAX_SCANS=500 \
           ./build/softplc
 
+      # The shipped example is the file operators copy, so a typo in it is a
+      # broken instruction manual. --show-config fails on anything unparseable.
+      - name: Check the example config file parses
+        run: SOFTPLC_CONFIG=examples/config/softplc.conf ./build/softplc --show-config
+
+      - name: Smoke-run each role through the single-container entrypoint
+        run: |
+          set -e
+          for role in none adapter scanner; do
+            echo "--- role=$role"
+            SOFTPLC_BIN_DIR="$PWD/build" \
+            SOFTPLC_ROLE=$role \
+            SOFTPLC_INSTANCE=ci-ep-$role \
+            SOFTPLC_SCANNER_DEVICES="$PWD/examples/config/scanner-devices.conf" \
+            SOFTPLC_CYCLE_US=2000 \
+            SOFTPLC_MAX_SCANS=200 \
+            bash docker/entrypoint.sh
+          done
+
+      # The claim the single-container form rests on: SIGKILL the real stack
+      # process and the PLC keeps scanning in the same process it started in.
+      - name: Verify a stack crash does not take the core down
+        run: tools/entrypoint_restart_check.sh build
+
   # The configuration that actually links OpENer. Kept separate because it
   # needs the submodule, and because a submodule fetch failure should not be
   # able to hide a real failure in the job above.
@@ -73,3 +97,37 @@ jobs:
 
       - name: Build the EtherNet/IP scanner image
         run: docker build -f docker/Dockerfile.eip-scanner -t softplc/eip-scanner:ci .
+
+      # The single-container form: core plus one stack, role chosen at run
+      # time. It is the only image that links both stacks, so it is also the
+      # only place the two could be found to conflict.
+      - name: Build the all-in-one image
+        run: docker build -f docker/Dockerfile.softplc -t softplc/all-in-one:ci .
+
+      - name: Run the all-in-one image in each role
+        run: |
+          set -e
+          for role in none adapter scanner; do
+            echo "--- role=$role"
+            docker run --rm \
+              -v "$PWD/examples/config/scanner-devices.conf:/etc/softplc/scanner-devices.conf:ro" \
+              -e SOFTPLC_ROLE=$role \
+              -e SOFTPLC_INSTANCE=ci-$role \
+              -e SOFTPLC_CYCLE_US=2000 \
+              -e SOFTPLC_MAX_SCANS=300 \
+              softplc/all-in-one:ci
+          done
+
+      # Configured entirely by mounted file, with no SOFTPLC_* in the
+      # environment: the path a deployment that uses the file actually takes.
+      - name: Check the mounted config file reaches the container
+        run: |
+          docker run --rm \
+            -v "$PWD/examples/config/softplc.conf:/etc/softplc/softplc.conf:ro" \
+            --entrypoint /usr/local/bin/softplc \
+            softplc/all-in-one:ci --show-config
+
+      - name: Validate the compose files
+        run: |
+          docker compose -f docker/docker-compose.yml config >/dev/null
+          docker compose -f docker/docker-compose.single.yml config >/dev/null

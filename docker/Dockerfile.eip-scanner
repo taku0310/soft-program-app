@@ -49,8 +49,12 @@ VOLUME ["/dev/shm"]
 # As originator this container opens outbound sessions to each device on TCP
 # 44818 and exchanges Class 1 I/O over UDP 2222. It listens on neither, so
 # nothing is exposed.
-ENV SOFTPLC_INSTANCE=default \
-    SOFTPLC_SCANNER_DEVICES=/etc/softplc/scanner-devices.conf \
-    SOFTPLC_LOG_LEVEL=info
+# No SOFTPLC_* defaults are set here, deliberately.
+#
+# The environment wins over a mounted config file - which is what makes
+# `docker run -e` and a compose `environment:` block work - so a default baked
+# in here would not be a default at all: it would silently override whatever
+# the operator wrote in /etc/softplc/softplc.conf.  The binary's own defaults
+# are the same values, and `softplc --show-config` prints them.
 
 ENTRYPOINT ["/usr/local/bin/softplc-eip-scanner"]

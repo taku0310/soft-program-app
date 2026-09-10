@@ -90,8 +90,11 @@ is the entire goal. Specifically **not** goals:
   check. A peer that cannot answer in time is, to a control loop,
   indistinguishable from a dead one — and a second liveness channel would only
   create a way for the two signals to disagree.
-* **No process restart.** The core degrades to failsafe and keeps scanning; a
-  supervisor or the container runtime brings the adapter back.
+* **No process restart *by the core*.** The core degrades to failsafe and keeps
+  scanning; a supervisor or the container runtime brings the adapter back. When
+  the two share a container the supervisor is `docker/entrypoint.sh`, which is
+  the only thing in this repository that restarts anything, and it restarts the
+  stack only — never the core.
 * **No state reconciliation on reconnect.** A returning adapter starts from
   zeroed assemblies and the first fresh exchange overwrites the failsafe image.
   Recovering plant state across a reconnect is application logic.
@@ -119,7 +122,8 @@ See [ADR 0005](adr/0005-failsafe-policy.md).
 
 Both roles are implemented, as independent adapters that can run together —
 necessarily on two stacks, since OpENer has no originator side and EIPScanner
-is originator-only.
+is originator-only. "Together" costs more than it looks: see
+[Deployment: role, not roles](#deployment-role-not-roles) below.
 
 **The CIP direction labels invert between them, while `%I`/`%Q` do not.** This
 is the single most likely source of a bug in this area, so it is stated in both
@@ -152,12 +156,65 @@ ordinary input. Per-device health is *data*, not adapter state, because what to
 do when one drive drops is plant logic. See
 [ADR 0008](adr/0008-scanner-aggregates-devices.md).
 
+## Deployment: role, not roles
+
+A **role** is the one question a deployment actually answers — is this PLC a
+device on someone else's network, or the thing driving remote I/O?
+
+    role = none | adapter | scanner
+
+It resolves to an adapter list inside `src/adapters/builtins.c`, the only file
+allowed to know a protocol's name, so a build without the Scanner has no
+`scanner` role at all and asking for one fails at start-up rather than coming
+up with nothing connected.
+
+It is one value rather than a set, and that is a protocol constraint rather
+than a simplification. **CIP class 1 I/O uses a fixed UDP port, 2222, at both
+ends.** An Adapter and a Scanner in one network namespace therefore receive
+each other's transmissions — found empirically during interop verification,
+as `Received data from unknown connection T2O_ID=<our own O2T id>`, and fixed
+only by separating the namespaces. A container is one network namespace, so:
+
+| deployment | containers | roles |
+|---|---|---|
+| `docker-compose.single.yml` | 1 (core + one stack process) | one |
+| `docker-compose.yml` | 3 | both, in separate namespaces |
+
+`SOFTPLC_ADAPTERS` still overrides the role's list, for the deployment that
+genuinely wants two protocols bound at once; setting both to different things
+warns rather than silently picking one, because the role still decides which
+stack process runs.
+
+What does **not** change between the two forms is the process split. The stack
+is a separate process against shared memory the core owns in both, so a stack
+crash costs a failsafe transition and not the PLC either way. Linking the stack
+into the core would be the thing that gave that up, and no deployment here does
+it. Inside one container `docker/entrypoint.sh` is the supervisor
+[ADR 0004](adr/0004-no-restart-no-reconnect-state.md) defers to: it restarts a
+dead stack without the core noticing, and takes the container down when the
+core exits, because the core owns the IPC objects the stack has mapped.
+
+### Configuration
+
+Settings resolve as **environment > config file > compiled-in default**. The
+file is INI, and introduces no second vocabulary: a key in section `S` is the
+environment variable `SOFTPLC_S_KEY`, `[core]` adds no prefix, and a key
+already spelled `SOFTPLC_...` is taken verbatim anywhere. The environment
+winning is what keeps the file from being a breaking change for deployments
+already driven by `docker run -e` — and is why no image sets a `SOFTPLC_*`
+default in `ENV`, which would override a mounted file rather than default it.
+
+The entrypoint does not parse any of this. It asks the core binary
+(`softplc --role`), so the two halves of a single-container deployment cannot
+be configured to disagree about what the container is.
+
 ## Layout
 
 ```
 include/softplc/
   protocol_adapter.h    the SIFB-inspired interface — start here
-  adapter_registry.h    factories, keyed by protocol name
+  adapter_registry.h    factories, keyed by protocol name; roles live here too
+  plc_config.h          settings: environment over an optional INI file
   plc_runtime.h         scan engine
   process_image.h       %I / %Q / %M
   std_fb.h              TON, TOF, TP, R_TRIG, CTU, ...

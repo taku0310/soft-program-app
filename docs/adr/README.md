@@ -14,3 +14,4 @@ and — as importantly — what each one rules out.
 | [0007](0007-opener-as-eip-stack.md) | OpENer as the EtherNet/IP stack, vendored as a submodule | accepted |
 | [0008](0008-scanner-aggregates-devices.md) | The Scanner aggregates its devices into one adapter | accepted |
 | [0009](0009-timeout-threshold-from-measurement.md) | The failsafe trigger: measured, and changed from a count to a duration | accepted |
+| [0010](0010-single-container-role-switch.md) | One container, one role, switched by configuration | accepted |

@@ -29,6 +29,7 @@
 #include <unistd.h>
 
 #include "softplc/ipc/shm.h"
+#include "softplc/plc_config.h"
 #include "softplc/plc_log.h"
 #include "softplc/protocol_adapter.h"
 
@@ -40,11 +41,6 @@ static volatile sig_atomic_t g_stop;
 static const eip_scanner_backend_t *g_backend;
 
 static void on_signal(int sig) { (void)sig; g_stop = 1; }
-
-static const char *env_str(const char *key, const char *fallback) {
-    const char *v = getenv(key);
-    return (v && *v) ? v : fallback;
-}
 
 static void sleep_us(uint32_t us) {
     struct timespec ts = { .tv_sec = us / 1000000u,
@@ -121,12 +117,12 @@ static plc_status_t attach(const char *instance, plc_shm_t *shm,
 }
 
 int main(int argc, char **argv) {
-    plc_log_init("eip-scanner");
+    if (plc_config_bootstrap("eip-scanner") != 0) return EXIT_FAILURE;
 
     const char *instance = (argc > 1) ? argv[1]
-                                      : env_str("SOFTPLC_INSTANCE", "default");
+                                      : plc_cfg_str("SOFTPLC_INSTANCE", "default");
     const char *table_path = (argc > 2) ? argv[2]
-        : env_str("SOFTPLC_SCANNER_DEVICES", "/etc/softplc/scanner-devices.conf");
+        : plc_cfg_str("SOFTPLC_SCANNER_DEVICES", "/etc/softplc/scanner-devices.conf");
 
     struct sigaction sa = { .sa_handler = on_signal };
     sigemptyset(&sa.sa_mask);
@@ -200,8 +196,10 @@ int main(int argc, char **argv) {
     }
 
     atomic_store(&map->status.adapter_state, PLC_ADAPTER_ONLINE);
-    PLC_LOG_INFO("serving instance '%s' with backend '%s': %u device(s)",
-                 instance, g_backend->name, table.device_count);
+    PLC_LOG_INFO("serving instance '%s' with backend '%s': %u device(s), "
+                 "config from %s",
+                 instance, g_backend->name, table.device_count,
+                 plc_config_source());
 
     /* --- service loop ---------------------------------------------------- */
 

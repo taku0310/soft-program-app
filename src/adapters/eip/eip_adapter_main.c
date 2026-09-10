@@ -33,6 +33,7 @@
 #include <unistd.h>
 
 #include "softplc/ipc/shm.h"
+#include "softplc/plc_config.h"
 #include "softplc/plc_log.h"
 #include "softplc/protocol_adapter.h"
 
@@ -44,19 +45,6 @@ static volatile sig_atomic_t g_stop;
 static void on_signal(int sig) {
     (void)sig;
     g_stop = 1;
-}
-
-static const char *env_str(const char *key, const char *fallback) {
-    const char *v = getenv(key);
-    return (v && *v) ? v : fallback;
-}
-
-static uint32_t env_u32(const char *key, uint32_t fallback) {
-    const char *v = getenv(key);
-    if (!v || !*v) return fallback;
-    char *end = NULL;
-    unsigned long n = strtoul(v, &end, 10);
-    return (end == v || n == 0 || n > 0xFFFFFFFFul) ? fallback : (uint32_t)n;
 }
 
 static void sleep_us(uint32_t us) {
@@ -138,12 +126,12 @@ static plc_status_t attach(const char *instance, plc_shm_t *shm, eip_shm_t **map
 }
 
 int main(int argc, char **argv) {
-    plc_log_init("eip-adapter");
+    if (plc_config_bootstrap("eip-adapter") != 0) return EXIT_FAILURE;
 
     const char *instance = (argc > 1) ? argv[1]
-                                      : env_str("SOFTPLC_INSTANCE", "default");
+                                      : plc_cfg_str("SOFTPLC_INSTANCE", "default");
     const char *iface    = (argc > 2) ? argv[2]
-                                      : env_str("SOFTPLC_EIP_INTERFACE", "eth0");
+                                      : plc_cfg_str("SOFTPLC_EIP_INTERFACE", "eth0");
 
     struct sigaction sa = { .sa_handler = on_signal };
     sigemptyset(&sa.sa_mask);
@@ -184,8 +172,8 @@ int main(int argc, char **argv) {
                                                     : EIP_DEFAULT_PRODUCED_ASSEMBLY,
         .consumed_assembly = map->consumed_assembly ? map->consumed_assembly
                                                     : EIP_DEFAULT_CONSUMED_ASSEMBLY,
-        .config_assembly   = env_u32("SOFTPLC_EIP_CONFIG_ASSEMBLY",
-                                     EIP_DEFAULT_CONFIG_ASSEMBLY),
+        .config_assembly   = plc_cfg_u32("SOFTPLC_EIP_CONFIG_ASSEMBLY",
+                                         EIP_DEFAULT_CONFIG_ASSEMBLY),
         .output_bytes      = map->output_bytes,
         .input_bytes       = map->input_bytes,
     };
@@ -203,8 +191,8 @@ int main(int argc, char **argv) {
     }
 
     atomic_store(&map->status.adapter_state, PLC_ADAPTER_ONLINE);
-    PLC_LOG_INFO("serving instance '%s' with backend '%s' on '%s'",
-                 instance, backend->name, iface);
+    PLC_LOG_INFO("serving instance '%s' with backend '%s' on '%s', config from %s",
+                 instance, backend->name, iface, plc_config_source());
 
     /* --- service loop ---------------------------------------------------- */
 

@@ -18,12 +18,16 @@ originator side at all. See [ADR 0007](docs/adr/0007-opener-as-eip-stack.md)
 and [ADR 0008](docs/adr/0008-scanner-aggregates-devices.md).
 
 ```
-┌── plc-core container ──┐          ┌── eip-adapter container ──┐
+┌── PLC core process ────┐          ┌── stack process ──────────┐
 │  IEC 61131-3 runtime   │ 2× SPSC  │  OpENer / CIP             │
 │  process image %I %Q %M│◄────────►│  assemblies               │◄─── scanner
 │  ProtocolAdapter       │  shm     │  (this one may crash)     │
 └────────────────────────┘          └───────────────────────────┘
 ```
+
+Two processes, always — that split is the crash-containment boundary, and it
+does not change with how they are packaged. Whether they are one container or
+two is a deployment choice.
 
 Read [`docs/architecture.md`](docs/architecture.md) for the design, and
 [`docs/adr/`](docs/adr/) for why each decision went the way it did.
@@ -68,32 +72,88 @@ cmake --build build -j
 SOFTPLC_ADAPTERS=loopback SOFTPLC_MAX_SCANS=1000 ./build/softplc
 
 # two processes over shared memory
-SOFTPLC_INSTANCE=line1 SOFTPLC_ADAPTERS=ethernet-ip ./build/softplc &
+SOFTPLC_INSTANCE=line1 SOFTPLC_ROLE=adapter ./build/softplc &
 ./build/softplc-eip-adapter line1 eth0
+
+# or let the single-container entrypoint start both, from a config file
+SOFTPLC_BIN_DIR=$PWD/build SOFTPLC_CONFIG=examples/config/softplc.conf \
+  bash docker/entrypoint.sh
+
+./build/softplc --list-roles
+SOFTPLC_CONFIG=examples/config/softplc.conf ./build/softplc --show-config
 ```
 
-Containers, and how the two share `/dev/shm`:
-[`docker/README.md`](docker/README.md).
+Containers: one image with the role switched by configuration when the PLC is
+either an Adapter or a Scanner, three when it is both.
+[`docker/README.md`](docker/README.md) has the reasoning and how the processes
+share `/dev/shm`.
 
 ```sh
+# one container: core + the one stack `role` calls for
+docker compose -f docker/docker-compose.single.yml up --build
+
+# three containers: both EtherNet/IP roles at once, which needs two
+# network namespaces because CIP class 1 uses UDP 2222 at both ends
 docker compose -f docker/docker-compose.yml up --build
 ```
 
 ## Configuration
 
-Everything is environment-driven, because the deployment unit is a container
-and there is no config file to mount.
+Two ways in, and they compose:
+
+    environment variable   >   config file   >   compiled-in default
+
+Everything below is an environment variable **and** a key in an optional INI
+file — `/etc/softplc/softplc.conf`, or wherever `SOFTPLC_CONFIG` points. A key
+in section `S` is the variable `SOFTPLC_S_KEY`, and `[core]` adds no prefix, so
+`[eip] interface` *is* `SOFTPLC_EIP_INTERFACE`; a key already spelled
+`SOFTPLC_...` is taken verbatim in any section. There is no second vocabulary
+to learn, and pasting a compose `environment:` block into the file works.
+
+```ini
+[core]
+role     = adapter        # none | adapter | scanner
+instance = line1
+cycle_us = 10000
+
+[eip]
+interface   = eth0
+input_bytes = 32
+```
+
+The environment wins, so a deployment that has always used `docker run -e` is
+unaffected by the file existing. `softplc --show-config` prints what resolved
+to what and flags anything the environment is overriding.
+[`examples/config/softplc.conf`](examples/config/softplc.conf) is a commented
+example.
 
 ### PLC core
 
 | variable | default | meaning |
 |---|---|---|
-| `SOFTPLC_INSTANCE` | `default` | namespaces the IPC objects; both containers must match |
-| `SOFTPLC_ADAPTERS` | `loopback` | comma-separated protocol names, mapped into `%I`/`%Q` in order |
+| `SOFTPLC_ROLE` | `none` | `none`, `adapter` or `scanner` — picks the adapter the core binds and the stack process that runs beside it. `softplc --list-roles` |
+| `SOFTPLC_INSTANCE` | `default` | namespaces the IPC objects; core and stack process must match |
+| `SOFTPLC_ADAPTERS` | from the role | comma-separated protocol names, mapped into `%I`/`%Q` in order. Overrides the role's list; needed only to bind two protocols at once |
 | `SOFTPLC_CYCLE_US` | `10000` | task period, µs |
 | `SOFTPLC_FAILSAFE` | `hold` | `hold` or `clear` — see [ADR 0005](docs/adr/0005-failsafe-policy.md) |
 | `SOFTPLC_MAX_SCANS` | `0` | stop after N scans; `0` runs until signalled |
 | `SOFTPLC_LOG_LEVEL` | `info` | `error`, `warn`, `info`, `debug` |
+| `SOFTPLC_CONFIG` | `/etc/softplc/softplc.conf` | the config file. Named explicitly, it must exist; left unset, the default path is read if present |
+
+`role` is one value rather than a set because CIP class 1 I/O uses UDP 2222 at
+**both** ends: an Adapter and a Scanner in one network namespace receive each
+other's traffic. Both roles at once needs two namespaces — see
+[ADR 0010](docs/adr/0010-single-container-role-switch.md).
+
+### Single-container supervision
+
+Read by [`docker/entrypoint.sh`](docker/entrypoint.sh), which starts the core
+and the role's stack process in one container.
+
+| variable | default | meaning |
+|---|---|---|
+| `SOFTPLC_STACK_RESTART` | `on` | restart the stack process if it dies. The core keeps scanning on failsafe values either way |
+| `SOFTPLC_STACK_RESTART_DELAY_MS` | `1000` | delay before that restart |
 
 ### EtherNet/IP Adapter (target role)
 
@@ -164,7 +224,14 @@ Working:
   per-device failsafe and a per-device health block in the input image.
 * Crash containment verified against a real `SIGKILL` of a real adapter
   process, for both `HOLD` and `CLEAR`; per-device loss verified separately.
-* Three container images sharing one `/dev/shm` namespace.
+* Containers both ways: one all-in-one image whose role is a runtime setting,
+  and three images sharing one `/dev/shm` namespace for the deployment that
+  needs both EtherNet/IP roles at once
+  ([ADR 0010](docs/adr/0010-single-container-role-switch.md)). A stack crash is
+  contained identically in either form.
+* Settings from an INI file underneath the environment, with the role resolved
+  by the core binary so the entrypoint and the core cannot disagree about what
+  the container is.
 * Timeout budget and failsafe trigger set from 100 000 measured exchanges over
   the real two-process path ([ADR 0009](docs/adr/0009-timeout-threshold-from-measurement.md)).
   The measurement also changed the trigger's *shape*: a count of consecutive

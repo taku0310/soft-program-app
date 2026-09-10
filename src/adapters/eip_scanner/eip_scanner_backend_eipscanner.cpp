@@ -20,6 +20,7 @@
  * policy from the device table. The core's adapter-level failsafe is a coarser
  * thing that only fires when this whole process stops answering.
  */
+#include "softplc/plc_config.h"
 #include "eip_scanner_backend.h"
 #include "eip_scanner_shm_layout_public.h"
 
@@ -177,7 +178,7 @@ plc_status_t scanner_init(const eip_scanner_config_t *cfg) {
      * lines, and hard-coding WARNING makes that impossible in the field. */
     {
         eipScanner::utils::LogLevel lvl = eipScanner::utils::LogLevel::WARNING;
-        if (const char *v = std::getenv("SOFTPLC_SCANNER_STACK_LOG")) {
+        if (const char *v = plc_cfg_str("SOFTPLC_SCANNER_STACK_LOG", nullptr)) {
             if      (std::strcmp(v, "debug") == 0) lvl = eipScanner::utils::LogLevel::DEBUG;
             else if (std::strcmp(v, "info")  == 0) lvl = eipScanner::utils::LogLevel::INFO;
             else if (std::strcmp(v, "error") == 0) lvl = eipScanner::utils::LogLevel::ERROR;

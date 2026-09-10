@@ -58,6 +58,27 @@ void plc_adapter_registry_reset(void);
  */
 void plc_adapter_register_builtins(void);
 
+/**
+ * @brief The adapter list a deployment role implies.
+ *
+ * A role is the coarse question an operator actually answers - "is this PLC a
+ * device on someone else's network, or the thing driving remote I/O?" - and it
+ * exists so a single image can be pointed either way from one setting.  It
+ * resolves to an adapter list here rather than in the application, for the
+ * same reason the factories do: this file is the only one allowed to know a
+ * protocol's name.
+ *
+ * Roles follow the build.  An image compiled without the Scanner has no
+ * `scanner` role, so asking for one fails at start-up instead of coming up
+ * with nothing connected.
+ *
+ * @return the comma-separated adapter list, or NULL when @p role is unknown.
+ */
+const char *plc_adapter_role_adapters(const char *role);
+
+/** @return role name at @p index, or NULL when out of range. */
+const char *plc_adapter_role_at(size_t index);
+
 #ifdef __cplusplus
 }
 #endif

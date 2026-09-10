@@ -31,6 +31,7 @@
 
 #include "softplc/adapter_registry.h"
 #include "softplc/ipc/shm.h"
+#include "softplc/plc_config.h"
 #include "softplc/plc_log.h"
 #include "softplc/protocol_adapter.h"
 
@@ -54,19 +55,6 @@ typedef struct scanner_proxy {
 
     plc_ipc_frame_t scratch;
 } scanner_proxy_t;
-
-static uint32_t env_u32(const char *key, uint32_t fallback) {
-    const char *v = getenv(key);
-    if (!v || !*v) return fallback;
-    char *end = NULL;
-    const unsigned long n = strtoul(v, &end, 10);
-    return (end == v || n == 0 || n > 0xFFFFFFFFul) ? fallback : (uint32_t)n;
-}
-
-static const char *env_str(const char *key, const char *fallback) {
-    const char *v = getenv(key);
-    return (v && *v) ? v : fallback;
-}
 
 /* --- lifecycle ----------------------------------------------------------- */
 
@@ -93,8 +81,8 @@ static plc_status_t proxy_open(plc_protocol_adapter_t *self,
      * as a silently truncated image rather than an error. */
     eip_scanner_config_t table;
     char err[160];
-    const char *path = env_str("SOFTPLC_SCANNER_DEVICES",
-                               "/etc/softplc/scanner-devices.conf");
+    const char *path = plc_cfg_str("SOFTPLC_SCANNER_DEVICES",
+                                   "/etc/softplc/scanner-devices.conf");
     plc_status_t st = eip_scanner_config_load(&table, path, err, sizeof(err));
     if (st != PLC_OK) {
         PLC_LOG_ERR("scanner device table %s: %s", path, err);
@@ -152,12 +140,12 @@ static plc_status_t proxy_open(plc_protocol_adapter_t *self,
     c->failsafe_policy = cfg->failsafe_policy;
     c->exchange_timeout_us = cfg->exchange_timeout_us
         ? cfg->exchange_timeout_us
-        : env_u32("SOFTPLC_SCANNER_EXCHANGE_TIMEOUT_US",
-                  EIP_SCANNER_DEFAULT_EXCHANGE_TIMEOUT_US);
+        : plc_cfg_u32("SOFTPLC_SCANNER_EXCHANGE_TIMEOUT_US",
+                      EIP_SCANNER_DEFAULT_EXCHANGE_TIMEOUT_US);
     c->failsafe_timeout_us = cfg->failsafe_timeout_us
         ? cfg->failsafe_timeout_us
-        : env_u32("SOFTPLC_SCANNER_FAILSAFE_TIMEOUT_US",
-                  EIP_SCANNER_DEFAULT_FAILSAFE_TIMEOUT_US);
+        : plc_cfg_u32("SOFTPLC_SCANNER_FAILSAFE_TIMEOUT_US",
+                      EIP_SCANNER_DEFAULT_FAILSAFE_TIMEOUT_US);
     c->flags = PLC_ADAPTER_CAP_OUT_OF_PROCESS;
     c->point_override_capacity = 0;
 

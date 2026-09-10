@@ -50,11 +50,23 @@ VOLUME ["/dev/shm"]
 # UDP 2222 for class 1 cyclic I/O, UDP 44818 for ListIdentity broadcasts.
 EXPOSE 44818/tcp 44818/udp 2222/udp
 
-# Runs as root: OpENer reads the interface MAC and binds to the host network,
-# which needs CAP_NET_RAW / CAP_NET_ADMIN.  Drop everything else in compose
-# rather than granting a general-purpose root container.
-ENV SOFTPLC_INSTANCE=default \
-    SOFTPLC_EIP_INTERFACE=eth0 \
-    SOFTPLC_LOG_LEVEL=info
+# Runs as root, and is granted CAP_NET_RAW / CAP_NET_ADMIN in compose, which
+# were granted defensively rather than measured.  Running the same OpENer
+# build as an unprivileged uid with no capabilities at all does in fact come
+# up and serve - it reads the interface MAC by ioctl and binds 44818 and 2222,
+# none of which is privileged (see docker/README.md).  Narrowing this is worth
+# doing; it is left alone here because this deployment is verified as it
+# stands and the change deserves its own container test.  What CAP_DAC_OVERRIDE
+# is genuinely for is the split itself: this container is root and the shared
+# memory was created 0600 by uid 10001.  The all-in-one image needs no
+# capabilities precisely because one container means one uid.
+
+# No SOFTPLC_* defaults are set here, deliberately.
+#
+# The environment wins over a mounted config file - which is what makes
+# `docker run -e` and a compose `environment:` block work - so a default baked
+# in here would not be a default at all: it would silently override whatever
+# the operator wrote in /etc/softplc/softplc.conf.  The binary's own defaults
+# are the same values, and `softplc --show-config` prints them.
 
 ENTRYPOINT ["/usr/local/bin/softplc-eip-adapter"]
