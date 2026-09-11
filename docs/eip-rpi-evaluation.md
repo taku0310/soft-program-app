@@ -514,7 +514,85 @@ The third is the one that would have failed an acceptance test outright:
 stopping a PLC has to stop its outputs, and a frozen image on a connection the
 controller still trusts is the opposite of that.
 
-## 15. What could not be measured
+## 15. Acceptance findings: configuration errors and unclean recovery
+
+### A size mismatch is rejected on the wire, and was invisible above it
+
+Device table asking for a 64-byte image against an Adapter configured for 32:
+
+```
+[INFO]  Send request: service=0x54 epath=[classId=6 objectId=1]
+[ERROR] Message Router error=0x additional statuses [0x127][0x26]
+[WARNING] ForwardOpen to 10.10.0.1 rejected
+```
+
+CIP extended status **0x127** is "invalid O→T network connection size", which
+is exactly right - OpENer refuses the connection rather than truncating it, and
+the Scanner retries. Seven attempts, seven rejections, in twelve seconds.
+
+The PLC, meanwhile, reported `online`.
+
+Not a lie about the transport - the Scanner *process* was answering the core
+promptly on every scan - but a green light on a link that had never carried a
+byte. The per-device health bytes did say offline, as designed, so a POU
+written to read them would have known; nothing at the adapter level did.
+
+Fixed: zero devices connected is now a degraded adapter, with the count in the
+message.
+
+```
+WARN  eip-scanner 'scanner': answering, but 0 of 1 devices are connected -
+      check the device table against what the targets accept (a rejected
+      ForwardOpen looks like this)
+```
+
+and when it is working, the same line carries the proportion, so "3 of 4" is
+visible without reading the image:
+
+```
+INFO  eip-scanner 'scanner': online, 1 of 1 devices connected
+```
+
+This does not reopen what [ADR 0008](adr/0008-scanner-aggregates-devices.md)
+settled. The health bytes remain the only place that says *which* device is
+down; "none of them" is an aggregate fact and belongs to the aggregate.
+
+### SIGKILL of the core, and the restart after it
+
+A killed core runs no cleanup, so its shared memory and both semaphores are
+left in `/dev/shm` with the ring cursors frozen where they stopped. Measured,
+end to end, with the real stacks:
+
+| | observed |
+|---|---|
+| IPC objects after the kill | all four left behind, as expected |
+| Orphaned stack process | alive immediately; **exited within 5 s** |
+| Peer's view during the gap | `0 of 1 devices are connected` |
+| After restarting the core | attached and `online, 1 of 1 devices connected` |
+
+It recovers, and two of this session's fixes are what make it recover rather
+than merely restart:
+
+* The orphaned stack exits because of the core-timeout added for §14. Without
+  it that process would have held the CIP connection open indefinitely,
+  producing the dead PLC's last output image at full rate while a new core
+  started up beside it.
+* The gap is visible because of the aggregate-state change above. It would
+  otherwise have read as `online` throughout.
+
+The stale objects themselves are harmless: `plc_shm_create()` and
+`plc_sem_create()` unlink before creating, so the next core gets a clean region
+rather than inheriting a stranger's cursors and matching replies against
+sequence numbers it never sent. `test_stale_region_does_not_poison_the_next_run`
+pins that down, because it is a one-line precaution guarding a failure that
+would otherwise surface only as an inexplicable protocol error after a crash.
+
+What is **not** cleaned up is the objects themselves if no core ever restarts:
+one region and two semaphores per instance stay in `/dev/shm` until something
+recreates or removes them. Bounded, self-healing on restart, and not worth
+code - but worth knowing before blaming a disk-space alert on something else.
+
+## 16. What could not be measured
 
 * **8–24 hour runs.** The longest completed run is 1 hour per RPI. The session
   container is reclaimed on inactivity, so multi-hour runs could not be

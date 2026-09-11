@@ -26,6 +26,7 @@
 
 #include "eip_shm_layout.h"
 #include "softplc/adapter_registry.h"
+#include "softplc/ipc/shm.h"
 #include "softplc/protocol_adapter.h"
 #include "test_util.h"
 
@@ -66,6 +67,46 @@ static int exchange_until_answering(plc_protocol_adapter_t *a,
  * Here the core simply stops asking. The adapter has to notice and go, which
  * is what lets the far end's connection timeout fire and its failsafe apply.
  */
+/**
+ * A core that is SIGKILLed runs no cleanup, so its shared memory and
+ * semaphores outlive it - with the ring cursors frozen wherever they were.
+ * The next core to start must not inherit them: resuming a stranger's cursors
+ * would have it match replies against sequence numbers it never sent.
+ *
+ * plc_shm_create() unlinks before creating for this reason; the test is here
+ * because that is a one-line precaution guarding a failure that would only
+ * ever show up as an inexplicable protocol error after a crash.
+ */
+static void test_stale_region_does_not_poison_the_next_run(void) {
+    char name[64];
+    snprintf(name, sizeof(name), "/softplc-staletest-%d", (int)getpid());
+
+    plc_shm_t first;
+    CHECK_EQ_INT(plc_shm_create(&first, name, sizeof(plc_spsc_ring_t)), PLC_OK);
+
+    /* Leave it looking like a run that died mid-exchange. */
+    plc_spsc_ring_t *ring = first.base;
+    plc_spsc_init(ring);
+    const uint8_t junk[8] = { 9, 9, 9, 9, 9, 9, 9, 9 };
+    CHECK_EQ_INT(plc_spsc_push(ring, 4242, junk, sizeof(junk)), PLC_OK);
+    CHECK_EQ_INT(plc_spsc_push(ring, 4243, junk, sizeof(junk)), PLC_OK);
+
+    /* Abandon it exactly as a killed process would: mapping still open, the
+     * name still in /dev/shm, nothing unlinked. */
+    first.owner = 0;
+    plc_shm_close(&first);
+
+    plc_shm_t second;
+    CHECK_EQ_INT(plc_shm_create(&second, name, sizeof(plc_spsc_ring_t)), PLC_OK);
+    plc_spsc_ring_t *fresh = second.base;
+
+    plc_ipc_frame_t f;
+    CHECK_EQ_INT(plc_spsc_pop(fresh, &f, PLC_IPC_MAX_FRAME_BYTES), PLC_ERR_AGAIN);
+
+    second.owner = 1;
+    plc_shm_close(&second);
+}
+
 static void test_adapter_exits_when_the_core_stops(void) {
     char instance[64];
     snprintf(instance, sizeof(instance), "coregone-%d", (int)getpid());
@@ -265,5 +306,6 @@ int main(void) {
     f->destroy(a);
 
     test_adapter_exits_when_the_core_stops();
+    test_stale_region_does_not_poison_the_next_run();
     TEST_REPORT("eip_ipc");
 }

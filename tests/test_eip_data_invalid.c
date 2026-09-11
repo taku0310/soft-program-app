@@ -117,14 +117,26 @@ static void test_no_connection_is_not_valid_data(void) {
     memset(out, 0xC5, sizeof(out));
     memset(in,  0xEE, sizeof(in));
 
+    /* Let the adapter process finish coming up first. Exchanges issued while
+     * it is still starting time out legitimately, and folding those into the
+     * measurement below would make the assertion depend on how long OpENer
+     * takes to initialise. */
+    pump(a, out, in, 40);
+
+    plc_adapter_stats_t before;
+    plc_adapter_get_stats(a, &before);
+
     const int ok = pump(a, out, in, 30);
     CHECK_EQ_INT(ok, 0);          /* not one exchange may report usable data */
 
     plc_adapter_stats_t st;
     plc_adapter_get_stats(a, &st);
-    CHECK(st.data_invalid > 0);
-    /* Counted apart from timeouts: the peer answered every time. */
-    CHECK_EQ_INT(st.timeouts, 0);
+    /* Over a window in which the adapter was serving throughout: every one of
+     * those thirty was answered, and every one was refused. Counted apart from
+     * timeouts precisely because the peer answered - a timeout is a peer that
+     * cannot, this is one that will not. */
+    CHECK_EQ_INT(st.data_invalid - before.data_invalid, 30);
+    CHECK_EQ_INT(st.timeouts - before.timeouts, 0);
     /* HOLD with nothing ever held is all zeros - defined, and not mistakable
      * for live data because the exchange refused it. */
     CHECK_EQ_INT(plc_adapter_state(a), PLC_ADAPTER_DEGRADED);

@@ -286,8 +286,33 @@ static plc_status_t proxy_exchange(plc_protocol_adapter_t *self,
     p->stats.last_rtt_us = rtt;
     if (rtt > p->stats.max_rtt_us) p->stats.max_rtt_us = rtt;
 
-    if (p->state != PLC_ADAPTER_ONLINE) {
-        PLC_LOG_INFO("eip-scanner '%s': online", p->caps.name);
+    /* The scanner process answering is not the same as the scanner working.
+     * Measured: with the device table asking for a 64-byte image against a
+     * 32-byte adapter, every ForwardOpen was rejected - correctly, with CIP
+     * extended status 0x127 - seven times in twelve seconds, and this adapter
+     * still reported ONLINE, because the process on the other side of the
+     * shared memory was healthy and prompt. A commissioning engineer reads
+     * that as a green light on a link that has never once carried data.
+     *
+     * Zero devices online is an aggregate fact, not a per-device one, so
+     * saying it here does not reopen what ADR 0008 settled: the health bytes
+     * remain the only place that says *which* device is down, and the image
+     * stays valid - the per-device failsafe has already been applied inside
+     * the scanner and a POU can read the health bytes. Hence PLC_OK with a
+     * degraded state, rather than the refusal the Adapter role returns when
+     * its payload means nothing at all. */
+    const uint32_t online = atomic_load(&p->map->status.devices_online);
+    if (online == 0) {
+        if (p->state != PLC_ADAPTER_DEGRADED) {
+            PLC_LOG_WARN("eip-scanner '%s': answering, but 0 of %u devices are "
+                         "connected - check the device table against what the "
+                         "targets accept (a rejected ForwardOpen looks like "
+                         "this)", p->caps.name, p->map->device_count);
+            p->state = PLC_ADAPTER_DEGRADED;
+        }
+    } else if (p->state != PLC_ADAPTER_ONLINE) {
+        PLC_LOG_INFO("eip-scanner '%s': online, %u of %u devices connected",
+                     p->caps.name, online, p->map->device_count);
         p->state = PLC_ADAPTER_ONLINE;
     }
     return PLC_OK;
