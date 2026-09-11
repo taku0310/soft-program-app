@@ -43,7 +43,7 @@ extern "C" {
 /** "EIP1" - checked on attach so a stale region from another build is
  *  rejected rather than misinterpreted. */
 #define EIP_SHM_MAGIC        0x45495031u
-#define EIP_SHM_ABI_VERSION  1u
+#define EIP_SHM_ABI_VERSION  2u
 
 #define EIP_SHM_NAME_MAX     128
 #define EIP_INSTANCE_MAX      32

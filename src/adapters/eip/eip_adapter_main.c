@@ -40,6 +40,28 @@
 #define ATTACH_RETRY_US   200000u  /* 200 ms between attach attempts */
 #define SERVICE_WAIT_US   500000u  /* doorbell wait; also the exit-check tick */
 
+/**
+ * @brief How long without a request before the core is presumed gone.
+ *
+ * Measured: after a clean SIGTERM to the core, this process kept the CIP
+ * connection open and produced the last output image for as long as it was
+ * left running - 493 identical frames over five seconds - so the controller
+ * saw a healthy Exclusive Owner connection delivering constant data and had
+ * no way to learn the PLC had stopped. Stopping a PLC has to stop its
+ * outputs; leaving them asserted on the wire is the opposite.
+ *
+ * A timeout rather than a liveness channel, for the same reason the core uses
+ * one on us (ADR 0003): a core that has stopped scanning and a core that has
+ * died are the same condition to a target, and one deadline cannot disagree
+ * with itself. It also covers the unclean case, where nothing gets to run a
+ * shutdown path at all.
+ *
+ * Generous against the worst scan stall measured on this class of host
+ * (279 ms, docs/eip-rpi-evaluation.md) - this must never fire on a PLC that
+ * is merely slow.
+ */
+#define CORE_TIMEOUT_US  2000000u
+
 static volatile sig_atomic_t g_stop;
 
 static void on_signal(int sig) {
@@ -199,12 +221,30 @@ int main(int argc, char **argv) {
     plc_ipc_frame_t frame;
     uint8_t reply[PLC_IPC_MAX_FRAME_BYTES];
 
+    const uint32_t core_timeout_us =
+        plc_cfg_u32("SOFTPLC_EIP_CORE_TIMEOUT_US", CORE_TIMEOUT_US);
+    uint64_t last_request_us = plc_now_us();
+
     while (!g_stop) {
         /* Bounded wait rather than an indefinite one, so a stopped core does
          * not leave this process unkillable-by-design and SIGTERM is still
          * observed within one tick. */
         const plc_status_t w = plc_sem_wait_timeout(sem_req, SERVICE_WAIT_US);
-        if (w == PLC_ERR_TIMEOUT) continue;
+        if (w == PLC_ERR_TIMEOUT) {
+            /* Nothing is scanning us. Keeping the connection up would leave
+             * the last commanded outputs asserted on a link the controller
+             * still believes in; dropping it lets the controller's own
+             * connection timeout fire and its failsafe apply. */
+            const uint64_t idle = plc_now_us() - last_request_us;
+            if (idle >= core_timeout_us) {
+                PLC_LOG_WARN("no request from the PLC core for %lluus; "
+                             "dropping the CIP connection and exiting so the "
+                             "scanner sees the PLC has stopped",
+                             (unsigned long long)idle);
+                break;
+            }
+            continue;
+        }
         if (w != PLC_OK) {
             PLC_LOG_ERR("doorbell wait failed; exiting");
             break;
@@ -212,6 +252,7 @@ int main(int argc, char **argv) {
 
         plc_status_t st = plc_spsc_pop(&map->req, &frame, PLC_IPC_MAX_FRAME_BYTES);
         if (st == PLC_ERR_AGAIN) continue;            /* spurious wake */
+        last_request_us = plc_now_us();
         if (st != PLC_OK) {
             /* A malformed frame is the core's problem to notice; drop it and
              * keep serving rather than taking the whole adapter down. */
@@ -223,9 +264,28 @@ int main(int argc, char **argv) {
         backend->publish_outputs(frame.data, frame.len);
         const size_t n = backend->fetch_inputs(reply, sizeof(reply));
 
+        /* Two ways to answer promptly and still have nothing valid to say,
+         * and before this both looked to the core exactly like good data.
+         *
+         * No I/O connection: the consumed assembly holds whatever was last
+         * written, or zeros if nobody ever connected. Replying with that made
+         * "no controller is driving us" indistinguishable from "the controller
+         * is sending zeros", and because the reply was prompt the staleness
+         * clock kept being reset, so the failsafe never fired.
+         *
+         * Peer idle: the originator's run/idle bit says its own data is not
+         * valid. OpENer applies the payload to the assembly regardless. */
+        uint32_t flags = 0;
+        if (backend->io_connections() == 0) {
+            flags |= PLC_IPC_FRAME_DATA_INVALID;
+        } else if (backend->peer_in_run && !backend->peer_in_run()) {
+            flags |= PLC_IPC_FRAME_DATA_INVALID;
+        }
+
         /* Echo the sequence number so the core can tell our reply apart from
          * a late one it already gave up on. */
-        st = plc_spsc_push(&map->rsp, frame.seq, reply, (uint32_t)n);
+        st = plc_spsc_push_flagged(&map->rsp, frame.seq, flags,
+                                   reply, (uint32_t)n);
         if (st != PLC_OK) {
             /* The core is not draining: it has stopped, or it is timing out
              * and discarding.  Drop the reply - it would be stale anyway. */

@@ -46,9 +46,24 @@ extern "C" {
 
 #define PLC_IPC_CACHELINE 64
 
+/**
+ * @brief The payload is present but must not be used.
+ *
+ * A responder sets this when it answered promptly and yet has nothing valid
+ * to say: no peer is driving it, or the peer that is driving it has declared
+ * its own data invalid (CIP's run/idle bit in the idle state).
+ *
+ * It rides on the frame rather than in a status word because it qualifies
+ * *this* payload. A flag in shared memory beside the ring could be read a
+ * scan out of step with the data it describes, which for a signal that gates
+ * whether outputs are driven is the wrong way round.
+ */
+#define PLC_IPC_FRAME_DATA_INVALID 0x00000001u
+
 typedef struct plc_ipc_frame {
     uint32_t seq;   /**< echoed by the responder so replies can be matched */
     uint32_t len;   /**< payload length, <= PLC_IPC_MAX_FRAME_BYTES        */
+    uint32_t flags; /**< PLC_IPC_FRAME_* describing this payload           */
     uint8_t  data[PLC_IPC_MAX_FRAME_BYTES];
 } plc_ipc_frame_t;
 
@@ -75,6 +90,11 @@ void plc_spsc_init(plc_spsc_ring_t *r);
  */
 plc_status_t plc_spsc_push(plc_spsc_ring_t *r, uint32_t seq,
                            const void *data, uint32_t len);
+
+/** As ::plc_spsc_push, carrying PLC_IPC_FRAME_* flags with the payload. */
+plc_status_t plc_spsc_push_flagged(plc_spsc_ring_t *r, uint32_t seq,
+                                   uint32_t flags,
+                                   const void *data, uint32_t len);
 
 /**
  * @brief Consume the oldest frame.  Consumer side only.

@@ -68,14 +68,25 @@ int main(void) {
     memset(out, 0x77, sizeof(out));
     memset(in, 0, sizeof(in));
 
-    int online = 0;
-    for (int i = 0; i < 200 && !online; ++i) {
-        online = (plc_adapter_exchange(a, out, sizeof(out), in, sizeof(in)) == PLC_OK);
-        if (!online) sleep_ms(20);
-    }
-    CHECK(online);
-    CHECK_EQ_INT(plc_adapter_exchange(a, out, sizeof(out), in, sizeof(in)), PLC_OK);
+    /* Wait for the adapter process to be serving. Against the mirror that
+     * shows as a successful exchange; against real OpENer with no scanner
+     * attached it shows as a refusal, because there is no controller driving
+     * us and the empty assembly is not valid input. Either way the process is
+     * alive, which is what has to be true before killing it means anything. */
+    int answering = 0;
+    for (int i = 0; i < 200 && !answering; ++i) {
+        const plc_status_t st =
+            plc_adapter_exchange(a, out, sizeof(out), in, sizeof(in));
 #if SOFTPLC_EIP_MIRROR_BACKEND
+        answering = (st == PLC_OK);
+#else
+        answering = (st == PLC_ERR_AGAIN);
+#endif
+        if (!answering) sleep_ms(20);
+    }
+    CHECK(answering);
+#if SOFTPLC_EIP_MIRROR_BACKEND
+    CHECK_EQ_INT(plc_adapter_exchange(a, out, sizeof(out), in, sizeof(in)), PLC_OK);
     CHECK_EQ_INT(in[0], 0x77);
 #endif
     const uint8_t last_good = in[0];

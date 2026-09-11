@@ -43,7 +43,7 @@ endif()
 if(SOFTPLC_WITH_EIP)
   # These fork and exec the real adapter binary, so they need it built first
   # and need to know where it landed.
-  foreach(t test_eip_ipc test_eip_failsafe_clear)
+  foreach(t test_eip_ipc test_eip_failsafe_clear test_eip_data_invalid)
     add_executable(${t} ${t}.c)
     target_link_libraries(${t} PRIVATE ${SOFTPLC_ADAPTERS_LINK})
     target_include_directories(${t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

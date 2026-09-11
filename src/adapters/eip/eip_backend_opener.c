@@ -86,6 +86,10 @@ static int                  g_stack_initialised;
 /* Written by OpENer's thread from CheckIoConnectionEvent(), read by the IPC
  * thread for status only - never for a control decision. */
 static _Atomic uint32_t g_io_connections;
+/* The originator's run/idle bit. Starts at RUN so that a connection which
+ * never carries a run/idle header is not mistaken for an idle one; the flag
+ * only ever means something once a peer has actually told us. */
+static _Atomic int g_peer_in_run = 1;
 static _Atomic uint64_t g_assembly_writes;
 
 /* --- OpENer application call-backs --------------------------------------- */
@@ -218,11 +222,20 @@ void CipFree(void *data) {
 void RunIdleChanged(EipUint32 run_idle_value) {
     /* The scanner's run/idle bit.  Reported through the Identity object's
      * extended device status, which is what a conformance tool checks. */
-    if ((run_idle_value & 0x0001u) == 1u) {
+    const int in_run = ((run_idle_value & 0x0001u) == 1u);
+    if (in_run) {
         CipIdentitySetExtendedDeviceStatus(kAtLeastOneIoConnectionInRunMode);
     } else {
         CipIdentitySetExtendedDeviceStatus(
             kAtLeastOneIoConnectionEstablishedAllInIdleMode);
+    }
+    /* Publishing it for the PLC, not only for the Identity object. OpENer
+     * hands the payload to the assembly whether the peer says RUN or IDLE
+     * (cipioconnection.c), so this is the only thing standing between an
+     * idle controller and outputs driven from data it called invalid. */
+    if (atomic_exchange(&g_peer_in_run, in_run) != in_run) {
+        PLC_LOG_WARN("scanner is now %s", in_run ? "in RUN" : "IDLE - "
+                     "its data is not valid and the failsafe policy applies");
     }
 }
 
@@ -355,6 +368,10 @@ static uint32_t opener_connections(void) {
     return atomic_load(&g_io_connections);
 }
 
+static int opener_peer_in_run(void) {
+    return atomic_load(&g_peer_in_run);
+}
+
 uint64_t eip_opener_assembly_writes(void);
 
 /** Consumed-assembly updates seen since start-up; published as status. */
@@ -369,6 +386,7 @@ static const eip_backend_t kOpenerBackend = {
     .publish_outputs = opener_publish,
     .fetch_inputs    = opener_fetch,
     .io_connections  = opener_connections,
+    .peer_in_run     = opener_peer_in_run,
 };
 
 const eip_backend_t *eip_backend_get(void) { return &kOpenerBackend; }

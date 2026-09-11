@@ -8,7 +8,8 @@
  * exercised end to end without a network, a NIC, or the OpENer submodule.
  * That is what CI runs.  It is not an EtherNet/IP implementation and does not
  * pretend to be one: io_connections() reports a synthetic 1 so that the status
- * plumbing has something to carry.
+ * plumbing has something to carry, and two settings can force it to report no
+ * connection or an idle peer so those paths are testable without hardware.
  */
 #include "eip_backend.h"
 
@@ -16,6 +17,7 @@
 #include <string.h>
 
 #include "softplc/ipc/spsc_ring.h"
+#include "softplc/plc_config.h"
 #include "softplc/plc_log.h"
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -57,7 +59,22 @@ static size_t lb_fetch(uint8_t *data, size_t cap) {
     return n;
 }
 
-static uint32_t lb_connections(void) { return 1; }
+/* Test-only, and the reason they exist: the two states in which a target
+ * answers promptly with nothing valid to say - nobody connected, and an
+ * originator asserting IDLE - are precisely the ones a mirror cannot reach on
+ * its own, and precisely the ones that were wrong. Without a way to reach them
+ * here, the fix would only ever be exercised against real hardware. Nothing in
+ * a production image sets either. */
+/* A boolean rather than a count: plc_cfg_u32() treats 0 as "unset" and hands
+ * back the fallback, so a MIRROR_CONNECTIONS=0 knob would have reported one
+ * connection and quietly passed a test written to prove the opposite. */
+static uint32_t lb_connections(void) {
+    return plc_cfg_bool("SOFTPLC_EIP_MIRROR_NO_CONNECTION", 0) ? 0u : 1u;
+}
+
+static int lb_peer_in_run(void) {
+    return plc_cfg_bool("SOFTPLC_EIP_MIRROR_IDLE", 0) ? 0 : 1;
+}
 
 static const eip_backend_t kLoopbackBackend = {
     .name            = "loopback",
@@ -66,6 +83,7 @@ static const eip_backend_t kLoopbackBackend = {
     .publish_outputs = lb_publish,
     .fetch_inputs    = lb_fetch,
     .io_connections  = lb_connections,
+    .peer_in_run     = lb_peer_in_run,
 };
 
 const eip_backend_t *eip_backend_get(void) { return &kLoopbackBackend; }

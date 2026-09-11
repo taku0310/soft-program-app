@@ -58,6 +58,40 @@ typedef struct eip_proxy {
     plc_ipc_frame_t scratch;   /* pre-allocated: exchange() must not malloc */
 } eip_proxy_t;
 
+/**
+ * The peer answered on time and told us its payload is not usable: nobody is
+ * driving it, or the originator is idle.
+ *
+ * Deliberately not routed through proxy_fail(). That path escalates on a
+ * *duration* without fresh data, because a missing frame is a suspicion and
+ * one of them must not be allowed to inject an edge. This is not a suspicion:
+ * it is the peer stating that its data is invalid, so the configured policy
+ * applies at once, the way a CIP target applies its idle action.
+ *
+ * The peer is alive, so liveness is refreshed - a stack that is answering is
+ * not a stack that has died. And last_good is left alone: were it overwritten
+ * with idle data, a later real connection loss would HOLD the idle image
+ * rather than the last image that actually meant something.
+ */
+static plc_status_t proxy_unusable(eip_proxy_t *p, void *in, size_t in_len) {
+    p->stats.data_invalid++;
+    plc_staleness_mark_fresh(&p->stale);
+    p->stats.stale_for_us = 0;
+
+    if (p->state != PLC_ADAPTER_DEGRADED) {
+        PLC_LOG_WARN("eip '%s': peer is answering but its data is not valid "
+                     "(no connection, or the scanner is idle); applying %s",
+                     p->caps.name,
+                     p->caps.failsafe_policy == PLC_FAILSAFE_CLEAR ? "CLEAR"
+                                                                  : "HOLD");
+        p->state = PLC_ADAPTER_DEGRADED;
+    }
+    plc_adapter_apply_failsafe(p->caps.failsafe_policy, in, p->last_good, in_len);
+    /* Not an error in the transport sense, but the scan did not receive usable
+     * inputs and the caller should be able to see that. */
+    return PLC_ERR_AGAIN;
+}
+
 /* --- lifecycle ----------------------------------------------------------- */
 
 static void proxy_teardown(eip_proxy_t *p) {
@@ -266,6 +300,10 @@ static plc_status_t proxy_exchange(plc_protocol_adapter_t *self,
             matched = 1;
             break;
         }
+    }
+
+    if (p->scratch.flags & PLC_IPC_FRAME_DATA_INVALID) {
+        return proxy_unusable(p, in, in_len);
     }
 
     /* A short reply is not an error: the adapter may have fewer bytes of

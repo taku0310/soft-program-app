@@ -54,6 +54,20 @@ typedef struct eip_backend {
 
     /** Established CIP I/O connections; 0 means no scanner is talking to us. */
     uint32_t (*io_connections)(void);
+
+    /**
+     * @brief Is the connected originator asserting RUN?
+     *
+     * CIP puts a run/idle header on the O->T frame, and IDLE means "the data
+     * in this frame is not valid, apply your idle action". OpENer reports the
+     * bit but applies the payload either way, so without this the PLC would
+     * keep driving outputs from data the controller has declared unusable.
+     *
+     * Returns 1 when the peer asserts RUN or when the question does not apply
+     * (no run/idle header configured), 0 when it asserts IDLE. Optional: a
+     * NULL pointer reads as "always RUN".
+     */
+    int (*peer_in_run)(void);
 } eip_backend_t;
 
 /** The backend this binary was built with.  Never NULL. */

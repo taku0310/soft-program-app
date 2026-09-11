@@ -64,6 +64,17 @@ ip netns exec plcB ip link set lo up
 # needs; left alone so it is not a variable.
 ip netns exec plcA ip link show vethA > "$OUT/link.txt" 2>&1
 
+# Optional impairment, applied to both ends so a round trip meets it twice -
+# which is what a real link does. netem's loss/delay/reorder are the three
+# properties every measurement in docs/eip-rpi-evaluation.md was taken
+# *without*: a clean veth never dropped a packet, so "zero UDP loss" said
+# nothing about tolerating any.
+if [ -n "${NETEM:-}" ]; then
+  ip netns exec plcA tc qdisc add dev vethA root netem $NETEM || exit 1
+  ip netns exec plcB tc qdisc add dev vethB root netem $NETEM || exit 1
+  log "netem on both ends: $NETEM"
+fi
+
 for exe in softplc-eip-adapter softplc-eip-scanner e2e_two_plc; do
   for p in $(pgrep -f "$B/$exe" 2>/dev/null); do kill -9 "$p" 2>/dev/null; done
 done

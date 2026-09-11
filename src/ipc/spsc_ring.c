@@ -12,6 +12,12 @@ void plc_spsc_init(plc_spsc_ring_t *r) {
 
 plc_status_t plc_spsc_push(plc_spsc_ring_t *r, uint32_t seq,
                            const void *data, uint32_t len) {
+    return plc_spsc_push_flagged(r, seq, 0u, data, len);
+}
+
+plc_status_t plc_spsc_push_flagged(plc_spsc_ring_t *r, uint32_t seq,
+                                   uint32_t flags,
+                                   const void *data, uint32_t len) {
     if (!r || len > PLC_IPC_MAX_FRAME_BYTES || (len && !data)) return PLC_ERR_INVAL;
 
     const uint32_t head = atomic_load_explicit(&r->head, memory_order_relaxed);
@@ -21,8 +27,9 @@ plc_status_t plc_spsc_push(plc_spsc_ring_t *r, uint32_t seq,
     if ((uint32_t)(head - tail) >= PLC_IPC_RING_SLOTS) return PLC_ERR_AGAIN;
 
     plc_ipc_frame_t *slot = &r->slots[head & (PLC_IPC_RING_SLOTS - 1)];
-    slot->seq = seq;
-    slot->len = len;
+    slot->seq   = seq;
+    slot->len   = len;
+    slot->flags = flags;
     if (len) memcpy(slot->data, data, len);
 
     /* Release: the payload above must be visible to the consumer before it can
@@ -39,8 +46,9 @@ plc_status_t plc_spsc_pop(plc_spsc_ring_t *r, plc_ipc_frame_t *out, uint32_t cap
     if (tail == head) return PLC_ERR_AGAIN;
 
     const plc_ipc_frame_t *slot = &r->slots[tail & (PLC_IPC_RING_SLOTS - 1)];
-    const uint32_t seq = slot->seq;
-    const uint32_t len = slot->len;
+    const uint32_t seq   = slot->seq;
+    const uint32_t len   = slot->len;
+    const uint32_t flags = slot->flags;
 
     /* The peer writes this field; treat it as untrusted.  A crashed or
      * mis-built peer must not be able to turn a length field into an
@@ -50,8 +58,9 @@ plc_status_t plc_spsc_pop(plc_spsc_ring_t *r, plc_ipc_frame_t *out, uint32_t cap
         return PLC_ERR_PROTO;
     }
 
-    out->seq = seq;
-    out->len = (len < cap) ? len : cap;
+    out->seq   = seq;
+    out->len   = (len < cap) ? len : cap;
+    out->flags = flags;
     if (out->len) memcpy(out->data, slot->data, out->len);
 
     atomic_store_explicit(&r->tail, tail + 1, memory_order_release);

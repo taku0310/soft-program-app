@@ -177,6 +177,11 @@ typedef struct plc_adapter_stats {
      *  the failsafe decision is made on, so it is the number to watch. */
     uint64_t stale_for_us;
     uint64_t failsafe_activations; /**< transitions into PLC_ADAPTER_FAULTED */
+    /** Exchanges the peer answered on time while telling us the payload must
+     *  not be used - no I/O connection, or an originator asserting IDLE.
+     *  Counted apart from timeouts because the cause and the fix differ:
+     *  a timeout is a peer that cannot answer, this is one that will not. */
+    uint64_t data_invalid;
     uint64_t protocol_errors;      /**< framing / sequence faults            */
     uint64_t last_rtt_us;          /**< round trip of the last exchange()    */
     uint64_t max_rtt_us;           /**< worst round trip since open()        */

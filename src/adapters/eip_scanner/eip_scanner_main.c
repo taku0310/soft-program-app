@@ -35,6 +35,19 @@
 
 #define ATTACH_RETRY_US 200000u
 #define SERVICE_WAIT_US 500000u
+
+/**
+ * @brief How long without a request before the PLC core is presumed gone.
+ *
+ * Worse here than in the Adapter role, which is why both have it. A Scanner's
+ * O->T frames *are* the remote devices' outputs: left running after the core
+ * stopped, this process would go on commanding drives from the last image the
+ * PLC produced, on connections those devices consider perfectly healthy.
+ * Dropping the connections lets each device's own connection timeout fire and
+ * its configured idle action apply, which is the behaviour the device was
+ * commissioned with.
+ */
+#define CORE_TIMEOUT_US 2000000u
 #define POLL_BUDGET_US    2000u
 
 static volatile sig_atomic_t g_stop;
@@ -207,8 +220,22 @@ int main(int argc, char **argv) {
     uint8_t reply[PLC_IPC_MAX_FRAME_BYTES];
     const uint32_t health_bytes = map->health_bytes;
 
+    const uint32_t core_timeout_us =
+        plc_cfg_u32("SOFTPLC_SCANNER_CORE_TIMEOUT_US", CORE_TIMEOUT_US);
+    uint64_t last_request_us = plc_now_us();
+
     while (!g_stop) {
         const plc_status_t w = plc_sem_wait_timeout(sem_req, SERVICE_WAIT_US);
+        if (w == PLC_ERR_TIMEOUT) {
+            const uint64_t idle = plc_now_us() - last_request_us;
+            if (idle >= core_timeout_us) {
+                PLC_LOG_WARN("no request from the PLC core for %lluus; closing "
+                             "the device connections and exiting rather than "
+                             "commanding drives from a stopped PLC",
+                             (unsigned long long)idle);
+                break;
+            }
+        }
         if (w == PLC_ERR_TIMEOUT) continue;
         if (w != PLC_OK) {
             PLC_LOG_ERR("doorbell wait failed; exiting");
@@ -216,6 +243,7 @@ int main(int argc, char **argv) {
         }
 
         plc_status_t st = plc_spsc_pop(&map->req, &frame, PLC_IPC_MAX_FRAME_BYTES);
+        if (st == PLC_OK) last_request_us = plc_now_us();
         if (st == PLC_ERR_AGAIN) continue;
         if (st != PLC_OK) {
             PLC_LOG_WARN("dropping malformed request frame");

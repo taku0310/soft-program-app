@@ -93,6 +93,30 @@ static void test_cursor_wraparound(void) {
     CHECK_EQ_INT(plc_spsc_count(&g_ring), 0);
 }
 
+/* The flag rides on the frame to say the payload must not be used. It was
+ * added to push and read by the proxy but not copied in pop, so it was
+ * silently always zero - the one value that means "this data is fine". */
+static void test_flags_survive_the_ring(void) {
+    plc_spsc_init(&g_ring);
+    const uint8_t payload[4] = { 1, 2, 3, 4 };
+
+    CHECK_EQ_INT(plc_spsc_push_flagged(&g_ring, 1, PLC_IPC_FRAME_DATA_INVALID,
+                                       payload, sizeof(payload)), PLC_OK);
+    CHECK_EQ_INT(plc_spsc_push(&g_ring, 2, payload, sizeof(payload)), PLC_OK);
+
+    plc_ipc_frame_t f;
+    memset(&f, 0xFF, sizeof(f));
+    CHECK_EQ_INT(plc_spsc_pop(&g_ring, &f, PLC_IPC_MAX_FRAME_BYTES), PLC_OK);
+    CHECK_EQ_INT(f.seq, 1);
+    CHECK_EQ_INT(f.flags, PLC_IPC_FRAME_DATA_INVALID);
+
+    memset(&f, 0xFF, sizeof(f));
+    CHECK_EQ_INT(plc_spsc_pop(&g_ring, &f, PLC_IPC_MAX_FRAME_BYTES), PLC_OK);
+    CHECK_EQ_INT(f.seq, 2);
+    /* Unflagged must read as unflagged even into a dirty destination. */
+    CHECK_EQ_INT(f.flags, 0);
+}
+
 int main(void) {
     test_empty();
     test_fifo();
@@ -100,5 +124,6 @@ int main(void) {
     test_zero_length();
     test_drain();
     test_cursor_wraparound();
+    test_flags_survive_the_ring();
     TEST_REPORT("spsc_ring");
 }
