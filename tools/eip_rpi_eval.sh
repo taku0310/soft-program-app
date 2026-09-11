@@ -37,7 +37,8 @@ log() { printf '%s | %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
 cleanup() {
   for pid in ${PIDS:-}; do kill -TERM "$pid" 2>/dev/null; done
-  [ -n "${STRESS_PID:-}" ] && kill -TERM "$STRESS_PID" 2>/dev/null
+  [ -n "${STRESS_PID:-}" ]   && kill -TERM "$STRESS_PID" 2>/dev/null
+  [ -n "${BLACKOUT_PID:-}" ] && kill -TERM "$BLACKOUT_PID" 2>/dev/null
   sleep 0.5
   for exe in softplc-eip-adapter softplc-eip-scanner e2e_two_plc; do
     for p in $(pgrep -f "$B/$exe" 2>/dev/null); do kill -9 "$p" 2>/dev/null; done
@@ -64,15 +65,30 @@ ip netns exec plcB ip link set lo up
 # needs; left alone so it is not a variable.
 ip netns exec plcA ip link show vethA > "$OUT/link.txt" 2>&1
 
-# Optional impairment, applied to both ends so a round trip meets it twice -
-# which is what a real link does. netem's loss/delay/reorder are the three
-# properties every measurement in docs/eip-rpi-evaluation.md was taken
-# *without*: a clean veth never dropped a packet, so "zero UDP loss" said
-# nothing about tolerating any.
-if [ -n "${NETEM:-}" ]; then
-  ip netns exec plcA tc qdisc add dev vethA root netem $NETEM || exit 1
-  ip netns exec plcB tc qdisc add dev vethB root netem $NETEM || exit 1
-  log "netem on both ends: $NETEM"
+# Impairment, applied to both ends so a round trip meets it twice, which is
+# what a real link does. Every measurement in docs/eip-rpi-evaluation.md was
+# taken on a link that never dropped a packet, so "zero UDP loss" there said
+# nothing whatever about tolerating any.
+#
+# iptables rather than tc netem: this kernel is built with
+# CONFIG_NET_SCH_NETEM unset, so `tc qdisc add ... netem` fails with
+# "Specified qdisc kind is unknown" however present the tc binary is. That
+# costs delay and reordering, which have no iptables equivalent; loss does,
+# and an outage is better modelled by a rule toggled on and off than by a
+# per-packet probability anyway.
+drop_rule() {   # $1 = netns, $2 = A|D (add/delete)
+  ip netns exec "$1" iptables -"$2" OUTPUT -p udp --dport 2222 \
+      -m statistic --mode random --probability "$LOSS_FRACTION" -j DROP
+}
+blackout_rule() {  # $1 = netns, $2 = A|D
+  ip netns exec "$1" iptables -"$2" OUTPUT -p udp --dport 2222 -j DROP
+}
+
+if [ -n "${LOSS_PCT:-}" ]; then
+  LOSS_FRACTION=$(awk "BEGIN { printf \"%.6f\", $LOSS_PCT / 100 }")
+  drop_rule plcA A || exit 1
+  drop_rule plcB A || exit 1
+  log "random loss on both ends: ${LOSS_PCT}% (p=$LOSS_FRACTION each way)"
 fi
 
 for exe in softplc-eip-adapter softplc-eip-scanner e2e_two_plc; do
@@ -142,6 +158,26 @@ case "$LOAD" in
   *) echo "unknown load '$LOAD'" >&2; exit 2 ;;
 esac
 [ "$LOAD" != "none" ] && log "load '$LOAD' started (pid ${STRESS_PID:-?})"
+
+# A repeating total outage. This is the measurement the CIP timeout budget is
+# actually about: the connection survives (4 << mult) x RPI without a frame and
+# not a microsecond more, so the question a plant asks - "how long a glitch can
+# this link take?" - is answered by lengthening an outage until the connection
+# drops, not by sprinkling independent loss.
+if [ -n "${BLACKOUT_MS:-}" ]; then
+  (
+    while :; do
+      sleep "$(awk "BEGIN { print ${BLACKOUT_PERIOD_MS:-5000} / 1000 }")"
+      blackout_rule plcA A 2>/dev/null
+      blackout_rule plcB A 2>/dev/null
+      sleep "$(awk "BEGIN { print $BLACKOUT_MS / 1000 }")"
+      blackout_rule plcA D 2>/dev/null
+      blackout_rule plcB D 2>/dev/null
+    done
+  ) &
+  BLACKOUT_PID=$!
+  log "periodic blackout: ${BLACKOUT_MS}ms every ${BLACKOUT_PERIOD_MS:-5000}ms"
+fi
 
 # --- measure -------------------------------------------------------------
 python3 tools/eip_sampler.py "$SECS" "$OUT/resources.csv" plcA,plcB -- \
