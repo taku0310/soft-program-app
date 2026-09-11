@@ -273,6 +273,7 @@ int main(int argc, char **argv) {
         atomic_store(&map->status.devices_online, g_backend->devices_online());
         atomic_store(&map->status.forward_opens, g_backend->forward_opens());
         atomic_store(&map->status.connection_losses, g_backend->connection_losses());
+        atomic_store(&map->status.out_of_order, g_backend->out_of_order());
     }
 
     PLC_LOG_INFO("stopping");

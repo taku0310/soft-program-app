@@ -488,15 +488,18 @@ shrinks with the RPI while the host's stalls do not.
 to 10, so the Adapter serves 10 ms as §8.1 describes. That is the default
 behaviour under test, not a fault in the run.)
 
-### Not measured
+### Not measured at the time — since closed
 
 **Delay, jitter and packet reordering could not be injected.** This kernel is
 built with `CONFIG_NET_SCH_NETEM` unset, so `tc qdisc add ... netem` fails with
 "Specified qdisc kind is unknown" however present the `tc` binary is; iptables
 has no equivalent. Ten conditions were run against netem and failed in a second
-each before this was diagnosed. Reordering in particular is worth testing on a
-kernel that supports it, because the CIP sequence number is what should absorb
-it and nothing here has exercised that path.
+each before this was diagnosed.
+
+That gap is closed in §16: since the kernel would not be the wire, the wire
+became a process. `tools/cip_impair.c` forwards frames between two namespaces
+and can hold one back, duplicate it, replay it or damage it on the way through.
+Reordering was the case worth reaching, and it found a defect.
 
 ## 14. Acceptance findings: safe states
 
@@ -641,7 +644,188 @@ one region and two semaphores per instance stay in `/dev/shm` until something
 recreates or removes them. Bounded, self-healing on restart, and not worth
 code - but worth knowing before blaming a disk-space alert on something else.
 
-## 16. What could not be measured
+## 16. Acceptance findings: a damaged wire
+
+netem is missing here, so `tools/cip_impair.c` stands in for it: an AF_PACKET
+forwarder in a middle namespace, damaging only CIP class 1 I/O (UDP 2222) and
+passing ARP and TCP 44818 intact. Everything below is measured through it at a
+10 ms RPI, one device, 32 bytes each way, with both PLCs reporting what reached
+their process images.
+
+Two things had to be right before any of it meant anything. The forwarder
+recomputes IP, UDP and TCP checksums, because a frame captured on the sending
+side may carry only a partial sum — offload finishes it later — and re-emitting
+it byte for byte gets it dropped silently by the receiver. And it takes the IP
+header's own length as authoritative rather than the frame length, because
+Ethernet pads anything under 60 bytes: deriving the length from the frame hands
+the padding to the receiver as payload, which corrupted the TCP session setup
+and looked exactly like the malformed-input failure the harness exists to find.
+
+**Baseline through the forwarder, nothing turned on:** ONLINE both directions,
+one ForwardOpen, no closes, `corrupt=0`. The wire is transparent.
+
+### Reordering: the process image stepped backwards (B1c)
+
+10 % of frames held back by 20 ms — two RPIs — in both directions:
+
+| | frames reordered | image went backwards | worst | connection |
+|---|---|---|---|---|
+| before | 195 (T→O) | **64** | 2 frames | survived |
+| after  | 195 (T→O) | **0** | — | survived |
+
+Same seed, same injection. A POU reading that image saw a value it had already
+passed, twice over — 20 ms of un-happening at a 10 ms cycle.
+
+**Cause.** `IOConnection::notifyReceiveData` parses the sequenced address
+item's count and hands it to the listener without ever comparing it. Upstream's
+own comment says as much: `// TODO: Check TypeIDs and sequence of the packages`.
+So every frame was delivered in arrival order, and arrival order is not send
+order on a real network. A device is now ONLINE only on a frame whose count is
+strictly newer than the one already in the image; the rest are dropped and
+counted in `out_of_order`, published in the scanner's status block so a network
+that reorders is visible rather than merely slightly wrong.
+
+**The other role was already correct.** OpENer compares with `SEQ_GT32` before
+passing consumed data to the assembly object, which is why the Adapter
+direction reads `back=0` in every run, before and after. The two stacks
+disagreed about a requirement the specification is explicit about, and only one
+of them was wrong.
+
+### Duplicates and replays (B3)
+
+10 % duplicated, 10 % replayed from eight frames back:
+
+| | injected (T→O) | image went backwards | worst |
+|---|---|---|---|
+| before | 291 dup + 310 replay | **230** | **9 frames** |
+| after  | 291 dup + 310 replay | **0** | — |
+
+Nine frames is 90 ms of stale data presented as current. The same sequence
+check covers both cases, because a duplicate and a replay are the same thing
+to a receiver: a count that does not advance.
+
+### Jitter (B1c)
+
+2 ms of delay with 8 ms of jitter on every frame — at a 10 ms RPI, enough for
+frames to overtake each other:
+
+| | image backwards | corrupt | connection |
+|---|---|---|---|
+| after the fix | 0 | 0 | ONLINE, 1 ForwardOpen, 0 closes |
+
+### Malformed datagrams: one packet killed the stack (B4)
+
+**This is the most severe finding in the acceptance set.**
+
+Truncated and bit-flipped I/O frames were injected, and the scanner stack
+process died with **SIGSEGV**. Reproduced deterministically afterwards with
+`tools/cip_fuzz.c`, which sends shaped malformed datagrams — an item count with
+no items behind it, an item claiming 0xFFFF bytes, a frame cut mid-header —
+from a third host on the same bridge:
+
+| build | scanner stack | adapter stack | the PLC core |
+|---|---|---|---|
+| before | **DEAD (SIGSEGV)** | alive | kept scanning, FAULTED, failsafe applied |
+| after  | alive, still serving | alive | ONLINE throughout |
+
+**Cause**, in `Buffer::operator>>(std::vector<uint8_t>&)`:
+
+```cpp
+std::copy(_buffer.begin() + _position,
+          _buffer.begin() + _position + val.size(), val.begin());
+```
+
+`val.size()` is the length field of a common packet item — a number taken
+straight off the wire. Nothing compares it to how many bytes actually arrived,
+and the `isValid()` test that would have caught it runs *after* the copy. Every
+scalar `operator>>` had the same shape, `_buffer[_position++]` with no bound.
+So an item claiming more than the datagram carries reads off the end of the
+heap.
+
+The I/O port is UDP on a plant network and CIP class 1 authenticates nothing,
+so the reachable precondition is "can send a UDP packet to the PLC". One
+datagram, one dead fieldbus stack, repeatable.
+
+Fixed in `patches/eipscanner-bounds.patch`: reads are bounded and mark the
+buffer invalid past the end, the length is checked before the copy rather than
+after, the receive handler drops a datagram that cannot hold what it claims,
+and the boundary our own C code calls across catches anything that still
+throws. `tools/e2e_cip_fuzz.sh` asserts both stacks survive 800 malformed
+datagrams and keep serving; it fails on the unpatched build.
+
+Worth stating plainly: **the process split did its job.** The core kept
+scanning in its own process, applied the failsafe, and was ONLINE again once
+the supervisor restarted the stack. A stack crash was always going to happen
+eventually; the architecture is what kept it from being a PLC crash.
+
+One result is not a defect and should not be read as one. A frame whose payload
+is corrupted *and* whose checksum is recomputed to match is delivered to the
+application: two such frames reached the image and were counted as `corrupt`.
+That models a forged or pre-checksum corruption, not a wire error — a wire
+error breaks the UDP checksum and never arrives. CIP class 1 carries no
+integrity or authenticity check of its own, so anything that can reach the port
+can write into the process image. That is a property of the protocol, and the
+answer to it is network segmentation, not a code change here.
+
+### Link down, cable-pull style (B2)
+
+Earlier outages dropped UDP 2222 with iptables, which leaves the TCP session
+established underneath: only the I/O stops. `ip link set <veth> down` takes the
+carrier, so the session dies too and recovery has to register a new session and
+issue a fresh ForwardOpen — a path nothing had previously executed.
+
+| policy | carrier loss → image shows it | carrier back → device online | policy violations while down |
+|---|---|---|---|
+| HOLD  | 162 ms | 159 ms | 0 over 601 scans |
+| CLEAR | 151 ms | 148 ms | 0 over 601 scans |
+
+Detection lands just under the `(4 << 2) × 10 ms` = 160 ms connection budget,
+which agrees with §13's blackout ladder finding that the boundary is the budget
+itself. The scanner logged the full sequence — `closed by timeout`, `session
+failed: No route to host`, `Unregistered session`, then `Registered session`
+and a ForwardOpen with a new serial number — and the image was live again
+afterwards, which is the part a health byte alone cannot show.
+
+### Two PLCs, one instance name (B5)
+
+A second core started on an instance name already in use took it over **without
+a word**: `plc_shm_create` unlinks before creating, so the incumbent kept
+scanning against a region nothing would answer, and which core the stack served
+came down to restart order.
+
+The unlink is deliberate — a crashed run must not wedge its own restart — so
+the fix is to tell the two apart. The creator now holds an advisory lock on the
+region for as long as it owns it. The kernel releases that lock however the
+owner exits, which is exactly the liveness question, with no pid to scan and no
+heartbeat to age out:
+
+```
+ERROR /softplc.dup.eip is already owned by a running process - another
+      instance with this name is live. Refusing to take it over.
+```
+
+The incumbent is untouched and the intruder exits non-zero.
+`tests/test_shm_ownership.c` pins both halves — a live owner is not evicted, a
+`SIGKILL`ed one leaves nothing behind — and fails on the old code.
+
+### Bandwidth saturation (B6)
+
+netem is absent but `tbf` and `htb` are not, so the link could be capped and
+then genuinely filled. 2 Mbit cap, competing UDP flood from a third host on the
+same bridge:
+
+| | through the cap | dropped | fresh images | connection |
+|---|---|---|---|---|
+| quiet | 59 kbit/s | 0 | 1854 / 1998 scans | ONLINE, 1 ForwardOpen |
+| saturated | **1294 kbit/s** | **3 799 926 pkt** | **533 / 1999 scans** | ONLINE, **2 ForwardOpens, 1 close** |
+
+Exclusive Owner survives a saturated link but not intact: the image refreshed
+on 27 % of scans instead of 93 %, and the connection dropped and re-established
+once. No corruption, no backwards steps. A PLC sharing a link with bulk traffic
+needs the traffic separated or prioritised; it will not simply degrade quietly.
+
+
+## 17. What could not be measured
 
 * **8–24 hour runs.** The longest completed run is 1 hour per RPI. The session
   container is reclaimed on inactivity, so multi-hour runs could not be
@@ -651,8 +835,12 @@ code - but worth knowing before blaming a disk-space alert on something else.
   third-party scanner has driven this Adapter and no real device has been driven
   by this Scanner.
 * **IPC totals for four conditions** (§7).
-* **Delay, jitter and reordering** — `CONFIG_NET_SCH_NETEM` is unset on this
-  kernel, so netem is unavailable and iptables offers no equivalent (§13).
+* **Delay, jitter and reordering through the kernel.** `CONFIG_NET_SCH_NETEM`
+  is unset, so netem is unavailable. These were measured instead through a
+  userspace forwarder (§16), which is not the same thing: it reproduces the
+  ordering and timing a network imposes, but it is a process on the host and
+  cannot model a NIC or a switch. `tbf` and `htb` are present, so bandwidth
+  limiting is the kernel's own.
 * **Scheduling latency of the kernel itself** — no `perf`, and
   `/proc/<pid>/schedstat` run-queue delay is the closest available proxy; it is
   reported per second, not per event, so it cannot be attributed to an

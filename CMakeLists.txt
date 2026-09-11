@@ -215,8 +215,24 @@ if(SOFTPLC_BUILD_TESTS AND SOFTPLC_WITH_EIP)
     # the connection under it goes.
     add_executable(e2e_cip_failsafe tools/e2e_cip_failsafe.c)
     target_link_libraries(e2e_cip_failsafe PRIVATE ${SOFTPLC_ADAPTERS_LINK})
+
+    # A cable pull, which iptables cannot reproduce: dropping UDP 2222 leaves
+    # the TCP session up, so session re-registration and a fresh ForwardOpen
+    # never run. This watches the image across a real link down and back up.
+    add_executable(e2e_link_survive tools/e2e_link_survive.c)
+    target_link_libraries(e2e_link_survive PRIVATE ${SOFTPLC_ADAPTERS_LINK})
   endif()
 
+
+  # The wire itself, when the kernel cannot be the wire. netem is absent here
+  # (CONFIG_NET_SCH_NETEM unset), so delay, jitter and reordering are injected
+  # by forwarding frames in userspace between two namespaces.
+  # Malformed input aimed at the class 1 I/O port, which is a UDP port anyone
+  # on the plant network can reach.
+  add_executable(cip_fuzz tools/cip_fuzz.c)
+
+  add_executable(cip_impair tools/cip_impair.c)
+  target_link_libraries(cip_impair PRIVATE Threads::Threads)
   # Wire-level measurement. Links nothing from this project on purpose: it has
   # to be able to contradict the processes it is watching, so it shares no code
   # with them and reads only what left the interface.

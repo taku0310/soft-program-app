@@ -43,7 +43,12 @@ wait_for() {
 # does not know `--role` and treats it as no argument at all, so it starts
 # scanning instead of answering - which looks like an entrypoint bug six
 # seconds later, and is not one.
-BIN="$HERE/$BUILD"
+# An absolute build directory is not a subdirectory of the repository, and
+# gluing $HERE onto one produces a path that exists nowhere.
+case "$BUILD" in
+    /*) BIN="$BUILD" ;;
+    *)  BIN="$HERE/$BUILD" ;;
+esac
 [[ -x "$BIN/softplc" ]] || fail "no softplc binary in $BIN"
 "$BIN/softplc" --list-roles 2>/dev/null | grep -q '^  adapter' \
     || fail "$BIN/softplc has no 'adapter' role - stale build directory?"

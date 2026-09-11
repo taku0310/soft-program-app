@@ -30,7 +30,12 @@ typedef struct plc_shm {
 } plc_shm_t;
 
 /** Create (O_EXCL) and map @p size bytes, zeroed.  Replaces a stale region of
- *  the same name: a leftover from a crashed run must not wedge a restart. */
+ *  the same name: a leftover from a crashed run must not wedge a restart.
+ *
+ *  A region whose creator is still alive is not stale, and is not replaced:
+ *  the creator holds an advisory lock for as long as it owns the region, so a
+ *  second process asking for the same name is refused with ::PLC_ERR_STATE
+ *  rather than silently taking it over. */
 plc_status_t plc_shm_create(plc_shm_t *shm, const char *name, size_t size);
 
 /**

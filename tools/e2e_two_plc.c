@@ -113,6 +113,12 @@ int main(int argc, char **argv) {
     uint64_t fresh_frames = 0;   /* peer's sequence advanced */
     uint64_t stale_frames = 0;   /* same frame seen again */
     uint64_t corrupt_bytes = 0;  /* per-index pattern mismatch */
+    /* A frame older than one already delivered. Under reordering or replay
+     * this is the question that matters: a stale frame that merely arrives is
+     * harmless, one that reaches the process image has put yesterday's value
+     * in front of a POU as though it were current. */
+    uint64_t regressions = 0;
+    uint32_t worst_regress = 0;
     /* Sampled during the run, not at the end: whichever side finishes first
      * takes its stack down with it, so the *final* health byte reflects the
      * teardown rather than the run. */
@@ -150,6 +156,13 @@ int main(int argc, char **argv) {
             if (peer_seq != 0) {
                 if (have_peer_seq) {
                     if (peer_seq != last_peer_seq) fresh_frames++; else stale_frames++;
+                    /* Signed difference, so the count survives the wrap. */
+                    const int32_t adv = (int32_t)(peer_seq - last_peer_seq);
+                    if (adv < 0) {
+                        regressions++;
+                        const uint32_t back = (uint32_t)(-adv);
+                        if (back > worst_regress) worst_regress = back;
+                    }
                 }
                 last_peer_seq = peer_seq;
                 have_peer_seq = 1;
@@ -174,7 +187,7 @@ int main(int argc, char **argv) {
 
     printf("%-8s tag=0x%02X  warmup=%llu  exchanges=%llu timeouts=%llu (%.1f%%)\n"
            "%-8s peer_tag=0x%02X  peer_frames=%llu  fresh=%llu stale=%llu  "
-           "corrupt=%llu  max_rtt=%lluus  state=%s\n",
+           "back=%llu(worst %u)  corrupt=%llu  max_rtt=%lluus  state=%s\n",
            role, pattern,
            (unsigned long long)warmup,
            (unsigned long long)ok, (unsigned long long)timeouts,
@@ -182,6 +195,7 @@ int main(int argc, char **argv) {
            role, seen,
            (unsigned long long)matched,
            (unsigned long long)fresh_frames, (unsigned long long)stale_frames,
+           (unsigned long long)regressions, worst_regress,
            (unsigned long long)corrupt_bytes,
            (unsigned long long)stats.max_rtt_us,
            plc_adapter_state_name(plc_adapter_state(a)));

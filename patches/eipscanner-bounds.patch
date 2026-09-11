@@ -1,0 +1,207 @@
+diff --git a/src/ConnectionManager.cpp b/src/ConnectionManager.cpp
+index a4c76a2..2bb602e 100644
+--- a/src/ConnectionManager.cpp
++++ b/src/ConnectionManager.cpp
+@@ -237,21 +237,43 @@ namespace eipScanner {
+ 			});
+ 
+ 			newSocket->setBeginReceiveHandler([this](BaseSocket& sock) {
+-				auto recvData = sock.Receive(8192);
+-				CommonPacket commonPacket;
+-				commonPacket.expand(recvData);
+-
+-				// TODO: Check TypeIDs and sequence of the packages
+-				Buffer buffer(commonPacket.getItems().at(0).getData());
+-				cip::CipUdint connectionId;
+-				buffer >> connectionId;
+-				Logger(LogLevel::DEBUG) << "Received data from connection T2O_ID=" << connectionId;
+-
+-				auto io = _connectionMap.find(connectionId);
+-				if (io != _connectionMap.end()) {
+-					io->second->notifyReceiveData(commonPacket.getItems().at(1).getData());
+-				} else {
+-					Logger(LogLevel::ERROR) << "Received data from unknown connection T2O_ID=" << connectionId;
++				/* Anything at all can arrive on this socket: it is a UDP port
++				 * on a plant network. A malformed datagram must cost one
++				 * dropped frame, not the process - and this handler runs
++				 * inside select(), so an exception leaving it unwinds out
++				 * through the C caller that drives the service loop. */
++				try {
++					auto recvData = sock.Receive(8192);
++					CommonPacket commonPacket;
++					commonPacket.expand(recvData);
++
++					// TODO: Check TypeIDs and sequence of the packages
++					if (commonPacket.getItems().size() < 2) {
++						Logger(LogLevel::ERROR) << "Ignoring a datagram with "
++							<< commonPacket.getItems().size()
++							<< " common packet item(s); a connected data "
++							   "message has two";
++						return;
++					}
++
++					Buffer buffer(commonPacket.getItems().at(0).getData());
++					cip::CipUdint connectionId;
++					buffer >> connectionId;
++					if (!buffer.isValid()) {
++						Logger(LogLevel::ERROR) << "Ignoring a datagram whose "
++							"address item is too short to hold a connection id";
++						return;
++					}
++					Logger(LogLevel::DEBUG) << "Received data from connection T2O_ID=" << connectionId;
++
++					auto io = _connectionMap.find(connectionId);
++					if (io != _connectionMap.end()) {
++						io->second->notifyReceiveData(commonPacket.getItems().at(1).getData());
++					} else {
++						Logger(LogLevel::ERROR) << "Received data from unknown connection T2O_ID=" << connectionId;
++					}
++				} catch (const std::exception& e) {
++					Logger(LogLevel::ERROR) << "Dropping a malformed datagram: " << e.what();
+ 				}
+ 			});
+ 
+diff --git a/src/utils/Buffer.cpp b/src/utils/Buffer.cpp
+index 0e3ed2a..9987e2c 100644
+--- a/src/utils/Buffer.cpp
++++ b/src/utils/Buffer.cpp
+@@ -2,6 +2,8 @@
+ // Created by flipback on 11/16/19.
+ //
+ 
++#include <algorithm>
++
+ #include "Buffer.h"
+ 
+ namespace eipScanner {
+@@ -18,6 +20,25 @@ namespace utils {
+ 	Buffer::Buffer() : _buffer(0), _position{0} {
+ 	}
+ 
++	/* Bounds-checked byte read.
++	 *
++	 * Every operator>> below indexed _buffer directly with _position++, and
++	 * the vector overload copied an attacker-supplied length without looking
++	 * at it at all: a CPF item claiming more bytes than the datagram carries
++	 * made std::copy read off the end of the heap. One UDP datagram to port
++	 * 2222 was enough to segfault the process (SIGSEGV, measured).
++	 *
++	 * Past the end, reads yield zero and leave _position beyond size() so
++	 * isValid() is false - which is what CommonPacket::expand already tests
++	 * before it trusts what it parsed. */
++	uint8_t Buffer::nextByte() {
++		if (_position >= _buffer.size()) {
++			_position = _buffer.size() + 1;
++			return 0;
++		}
++		return _buffer[_position++];
++	}
++
+ 	Buffer &Buffer::operator<<(uint8_t val) {
+ 		_buffer.push_back(val);
+ 		return *this;
+@@ -25,7 +46,7 @@ namespace utils {
+ 	}
+ 
+ 	Buffer &Buffer::operator>>(uint8_t &val) {
+-		val = _buffer[_position++];
++		val = nextByte();
+ 		return *this;
+ 
+ 	}
+@@ -37,7 +58,7 @@ namespace utils {
+ 	}
+ 
+ 	Buffer &Buffer::operator>>(int8_t &val) {
+-		val = static_cast<uint8_t>(_buffer[_position++]);
++		val = static_cast<uint8_t>(nextByte());
+ 		return *this;
+ 	}
+ 
+@@ -48,8 +69,8 @@ namespace utils {
+ 	}
+ 
+ 	Buffer &Buffer::operator>>(uint16_t &val) {
+-		val = static_cast<uint16_t>(_buffer[_position++]);
+-		val += static_cast<uint16_t>(_buffer[_position++] << 8);
++		val = static_cast<uint16_t>(nextByte());
++		val += static_cast<uint16_t>(nextByte() << 8);
+ 		return *this;
+ 	}
+ 
+@@ -71,10 +92,10 @@ namespace utils {
+ 	}
+ 
+ 	Buffer &Buffer::operator>>(uint32_t &val) {
+-		val = static_cast<uint32_t>(_buffer[_position++]);
+-		val += static_cast<uint32_t>(_buffer[_position++] << 8);
+-		val += static_cast<uint32_t>(_buffer[_position++] << 16);
+-		val += static_cast<uint32_t>(_buffer[_position++] << 24);
++		val = static_cast<uint32_t>(nextByte());
++		val += static_cast<uint32_t>(nextByte() << 8);
++		val += static_cast<uint32_t>(nextByte() << 16);
++		val += static_cast<uint32_t>(nextByte() << 24);
+ 
+ 		return *this;
+ 	}
+@@ -101,14 +122,14 @@ namespace utils {
+ 	}
+ 
+ 	Buffer &Buffer::operator>>(uint64_t &val) {
+-		val = static_cast<uint64_t>(_buffer[_position++]);
+-		val += static_cast<uint64_t>(_buffer[_position++]) << 8;
+-		val += static_cast<uint64_t>(_buffer[_position++]) << 16;
+-		val += static_cast<uint64_t>(_buffer[_position++]) << 24;
+-		val += static_cast<uint64_t>(_buffer[_position++]) << 32;
+-		val += static_cast<uint64_t>(_buffer[_position++]) << 40;
+-		val += static_cast<uint64_t>(_buffer[_position++]) << 48;
+-		val += static_cast<uint64_t>(_buffer[_position++]) << 56;
++		val = static_cast<uint64_t>(nextByte());
++		val += static_cast<uint64_t>(nextByte()) << 8;
++		val += static_cast<uint64_t>(nextByte()) << 16;
++		val += static_cast<uint64_t>(nextByte()) << 24;
++		val += static_cast<uint64_t>(nextByte()) << 32;
++		val += static_cast<uint64_t>(nextByte()) << 40;
++		val += static_cast<uint64_t>(nextByte()) << 48;
++		val += static_cast<uint64_t>(nextByte()) << 56;
+ 
+ 		return *this;
+ 	}
+@@ -143,6 +164,13 @@ Buffer &Buffer::operator<<(float val) {
+ 	}
+ 
+ 	Buffer &Buffer::operator>>(std::vector<uint8_t> &val) {
++		/* val.size() comes from the wire. Checked before the copy, because
++		 * afterwards is far too late. */
++		if (_position + val.size() > _buffer.size()) {
++			_position = _buffer.size() + 1;
++			std::fill(val.begin(), val.end(), 0);
++			return *this;
++		}
+ 		std::copy(_buffer.begin() + _position, _buffer.begin() + _position + val.size(), val.begin());
+ 		_position += val.size();
+ 		return *this;
+@@ -159,8 +187,8 @@ Buffer &Buffer::operator<<(float val) {
+ 
+ 	Buffer &Buffer::operator>>(std::vector<uint16_t> &val) {
+ 		for (auto& v : val) {
+-			v = static_cast<int16_t>(_buffer[_position++]);
+-			v += static_cast<int16_t>(_buffer[_position++] << 8);
++			v = static_cast<int16_t>(nextByte());
++			v += static_cast<int16_t>(nextByte() << 8);
+ 		}
+ 
+ 		return *this;
+diff --git a/src/utils/Buffer.h b/src/utils/Buffer.h
+index 32c1409..f340d7c 100644
+--- a/src/utils/Buffer.h
++++ b/src/utils/Buffer.h
+@@ -114,6 +114,8 @@ namespace utils {
+ 		bool isValid() const { return _position <= _buffer.size(); }
+ 		bool empty() const  { return  _position >= _buffer.size(); }
+ 	private:
++		uint8_t nextByte();
++
+ 		std::vector<uint8_t> _buffer;
+ 		size_t _position;
+ 	};

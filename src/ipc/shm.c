@@ -4,6 +4,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -21,12 +22,52 @@ plc_status_t plc_shm_create(plc_shm_t *shm, const char *name, size_t size) {
     /* A region left behind by a crashed run would otherwise be inherited with
      * whatever cursors it died holding.  Unlink first so we always start from
      * a known-empty ring; anyone still attached keeps their mapping and simply
-     * stops being visible to us, which is the containment behaviour we want. */
+     * stops being visible to us, which is the containment behaviour we want.
+     *
+     * But "left behind by a crashed run" and "owned by a process still using
+     * it" look identical from the filesystem, and unlinking the second is how
+     * a second core on the same instance name used to take over in silence:
+     * it replaced the region, the incumbent kept scanning against a mapping
+     * nothing would ever answer, and which of the two the stack served came
+     * down to restart order.  So the creator holds an advisory lock on the
+     * region for as long as it owns it.  The kernel drops that lock when the
+     * owner exits however it exits, which is exactly the liveness question -
+     * no pid to scan, no heartbeat to age out, no layout change.
+     *
+     * A lock we can take means nobody is behind it.  Two creators starting in
+     * the same instant can still both get past this; it guards against a
+     * misconfiguration, not against a race, and a misconfiguration is what
+     * this is. */
+    int probe = shm_open(name, O_RDWR, 0);
+    if (probe >= 0) {
+        if (flock(probe, LOCK_EX | LOCK_NB) != 0) {
+            const int err = errno;
+            close(probe);
+            if (err == EWOULDBLOCK) {
+                PLC_LOG_ERR("%s is already owned by a running process - "
+                            "another instance with this name is live. Refusing "
+                            "to take it over.", name);
+                return PLC_ERR_STATE;
+            }
+            PLC_LOG_ERR("flock(%s) failed: %s", name, strerror(err));
+            return PLC_ERR_IO;
+        }
+        /* Stale.  Closing releases the probe's lock; the unlink below is what
+         * actually clears it. */
+        close(probe);
+    }
     shm_unlink(name);
 
     shm->fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, S_IRUSR | S_IWUSR);
     if (shm->fd < 0) {
         PLC_LOG_ERR("shm_open(%s) create failed: %s", name, strerror(errno));
+        return PLC_ERR_IO;
+    }
+    if (flock(shm->fd, LOCK_EX | LOCK_NB) != 0) {
+        PLC_LOG_ERR("flock(%s) failed after create: %s", name, strerror(errno));
+        close(shm->fd);
+        shm->fd = -1;
+        shm_unlink(name);
         return PLC_ERR_IO;
     }
     if (ftruncate(shm->fd, (off_t)size) != 0) {

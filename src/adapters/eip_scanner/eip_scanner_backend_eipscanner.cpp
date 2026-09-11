@@ -65,6 +65,16 @@ struct Device {
     /** Has this device ever delivered data, on any connection? Separates
      *  "lost what we had" from "never had anything". */
     bool                   ever_data = false;
+    /** Last CIP sequence count accepted on the current connection.
+     *
+     * Upstream parses the sequenced address item's count and hands it to the
+     * listener without ever comparing it, so a frame that arrives late is
+     * delivered like any other and overwrites newer data. Measured on a wire
+     * reordering 10 % of frames by two RPIs: the image stepped backwards 64
+     * times in 19 seconds, which a POU reads as a value that un-happened.
+     * The count is a CipUint, so the comparison has to wrap at 16 bits. */
+    uint16_t               last_seq = 0;
+    bool                   have_seq = false;
     /** Last image received while connected; what HOLD reproduces. */
     std::vector<uint8_t>   last_good;
     /** Latest received image, published to the IPC thread under g_lock. */
@@ -80,6 +90,7 @@ std::vector<Device>    g_devices;
 std::unique_ptr<ConnectionManager> g_cm;
 uint64_t               g_forward_opens = 0;
 uint64_t               g_losses        = 0;
+uint64_t               g_out_of_order  = 0;
 
 constexpr auto kReconnectInterval = std::chrono::seconds(2);
 
@@ -146,16 +157,30 @@ void connect_device(size_t index) {
         std::lock_guard<std::mutex> lk(g_lock);
         ptr->setDataToSend(dev.to_send);
         /* A new connection starts with nothing received on it, whatever the
-         * last one left in ::latest. */
+         * last one left in ::latest - and with a sequence count that begins
+         * again at 1, so the previous connection's is not a baseline. */
         dev.has_data = false;
+        dev.have_seq = false;
     }
 
     ptr->setReceiveDataListener(
-        [index](auto /*realTimeHeader*/, auto /*sequence*/,
+        [index](auto /*realTimeHeader*/, auto sequence,
                 const std::vector<uint8_t> &data) {
             /* Runs on the stack thread inside handleConnections(). */
             Device &d = g_devices[index];
             std::lock_guard<std::mutex> lk(g_lock);
+
+            /* Out of order, or the same frame twice: drop it. Only a frame
+             * strictly newer than what is already in the image may replace
+             * it - the reason CIP carries the count at all. */
+            if (d.have_seq &&
+                (int16_t)((uint16_t)sequence - d.last_seq) <= 0) {
+                g_out_of_order++;
+                return;
+            }
+            d.last_seq = (uint16_t)sequence;
+            d.have_seq = true;
+
             const size_t n = std::min<size_t>(data.size(), d.latest.size());
             if (n) std::memcpy(d.latest.data(), data.data(), n);
             if (n < d.latest.size()) {
@@ -258,14 +283,34 @@ void scanner_poll(uint32_t budget_us) {
      * needs at full speed, burn a core, and on a small host starve exchanges
      * past their budget. A scanner whose devices are all down must idle, not
      * spin. */
-    if (g_cm->hasOpenConnections()) {
-        g_cm->handleConnections(std::chrono::milliseconds(budget_us / 1000 + 1));
-    } else {
-        std::this_thread::sleep_for(std::chrono::microseconds(budget_us));
+    /* This function is called from C. An exception that escapes it does not
+     * unwind - it terminates the process, and upstream throws on malformed
+     * input by design. The handler inside the socket call-back catches what
+     * it can see; this is the boundary that has to hold whatever it misses. */
+    try {
+        if (g_cm->hasOpenConnections()) {
+            g_cm->handleConnections(std::chrono::milliseconds(budget_us / 1000 + 1));
+        } else {
+            std::this_thread::sleep_for(std::chrono::microseconds(budget_us));
+        }
+    } catch (const std::exception &e) {
+        eipScanner::utils::Logger(eipScanner::utils::LogLevel::ERROR)
+            << "stack threw while servicing connections: " << e.what();
+    } catch (...) {
+        eipScanner::utils::Logger(eipScanner::utils::LogLevel::ERROR)
+            << "stack threw a non-standard exception while servicing connections";
     }
 
     for (size_t i = 0; i < g_devices.size(); ++i) {
-        if (!g_devices[i].connected) connect_device(i);
+        if (!g_devices[i].connected) {
+            try {
+                connect_device(i);
+            } catch (const std::exception &e) {
+                eipScanner::utils::Logger(eipScanner::utils::LogLevel::ERROR)
+                    << "connect to " << g_devices[i].cfg.address
+                    << " threw: " << e.what();
+            }
+        }
     }
 }
 
@@ -325,6 +370,7 @@ uint32_t scanner_online() {
 
 uint64_t scanner_forward_opens() { return g_forward_opens; }
 uint64_t scanner_losses()        { return g_losses; }
+uint64_t scanner_out_of_order()  { return g_out_of_order; }
 
 const eip_scanner_backend_t kEipScanner = {
     "eipscanner",
@@ -335,6 +381,7 @@ const eip_scanner_backend_t kEipScanner = {
     scanner_online,
     scanner_forward_opens,
     scanner_losses,
+    scanner_out_of_order,
 };
 
 }  // namespace

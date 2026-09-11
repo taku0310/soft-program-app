@@ -60,6 +60,8 @@ typedef struct eip_scanner_backend {
     uint32_t (*devices_online)(void);
     uint64_t (*forward_opens)(void);
     uint64_t (*connection_losses)(void);
+    /** Frames dropped for arriving out of order or twice. */
+    uint64_t (*out_of_order)(void);
 } eip_scanner_backend_t;
 
 /** The backend this binary was built with.  Never NULL. */

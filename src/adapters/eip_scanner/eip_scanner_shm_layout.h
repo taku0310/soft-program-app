@@ -56,7 +56,7 @@
 
 /** "EIS1". */
 #define EIP_SCANNER_SHM_MAGIC       0x45495331u
-#define EIP_SCANNER_SHM_ABI_VERSION 2u
+#define EIP_SCANNER_SHM_ABI_VERSION 3u
 
 #define EIP_SCANNER_SHM_NAME_MAX 128
 #define EIP_SCANNER_INSTANCE_MAX  32
@@ -90,6 +90,10 @@ typedef struct eip_scanner_status {
     _Atomic uint64_t cycles;             /**< service loop iterations      */
     _Atomic uint64_t forward_opens;      /**< successful ForwardOpen count */
     _Atomic uint64_t connection_losses;  /**< connections dropped/timed out*/
+    /** Frames discarded because their CIP sequence count did not advance.
+     *  A network that reorders or replays is otherwise invisible from above:
+     *  the data is simply correct, and slightly old. */
+    _Atomic uint64_t out_of_order;
     _Atomic uint64_t last_error;
 } eip_scanner_status_t;
 

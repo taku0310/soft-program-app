@@ -23,11 +23,21 @@ endif()
 # --------------------------------------------------------------------------
 # Vendored fix, applied to the submodule working tree at configure time.
 #
-# IOConnection's send timer loses real time twice over, which showed up as an
-# O->T period of 11 982 us against a 10 ms RPI (docs/eip-rpi-evaluation.md).
-# It is carried as a patch rather than a fork because a submodule bump should
-# stay a pointer change; if upstream fixes it, `git apply --check` starts
-# failing and this block is the thing to delete.
+# Two of them:
+#
+#   eipscanner-io-timer  IOConnection's send timer loses real time twice over,
+#                        which showed up as an O->T period of 11 982 us
+#                        against a 10 ms RPI (docs/eip-rpi-evaluation.md).
+#
+#   eipscanner-bounds    Buffer::operator>> read past the end of the datagram,
+#                        and the vector overload copied an attacker-supplied
+#                        length without checking it. One malformed UDP
+#                        datagram to port 2222 segfaulted the scanner process
+#                        (SIGSEGV, measured - see the acceptance report).
+#
+# They are carried as patches rather than a fork because a submodule bump
+# should stay a pointer change; if upstream fixes one, `git apply --check`
+# starts failing and that patch is the thing to delete.
 #
 # Applying it dirties the submodule working tree - `git status` will show
 # third_party/EIPScanner as modified after a configure. That is expected, and
@@ -40,15 +50,19 @@ endif()
 # scanner fails in the least visible way there is, by sending 20% slow. If it
 # has been reverted, delete the build directory or re-run cmake.
 # --------------------------------------------------------------------------
-set(EIPSCANNER_PATCH ${CMAKE_CURRENT_SOURCE_DIR}/patches/eipscanner-io-timer.patch)
+set(EIPSCANNER_PATCHES
+  ${CMAKE_CURRENT_SOURCE_DIR}/patches/eipscanner-io-timer.patch
+  ${CMAKE_CURRENT_SOURCE_DIR}/patches/eipscanner-bounds.patch)
 
-if(NOT EXISTS ${EIPSCANNER_PATCH})
-  message(FATAL_ERROR
-    "Missing ${EIPSCANNER_PATCH}.\n"
-    "Building the Scanner needs the patches/ directory. In a container build "
-    "that means `COPY patches ./patches` in the Dockerfile - see the note in "
-    "the top-level CMakeLists.txt.")
-endif()
+foreach(EIPSCANNER_PATCH ${EIPSCANNER_PATCHES})
+  if(NOT EXISTS ${EIPSCANNER_PATCH})
+    message(FATAL_ERROR
+      "Missing ${EIPSCANNER_PATCH}.\n"
+      "Building the Scanner needs the patches/ directory. In a container build "
+      "that means `COPY patches ./patches` in the Dockerfile - see the note in "
+      "the top-level CMakeLists.txt.")
+  endif()
+endforeach()
 
 # git apply works outside a git repository, which matters: in a container build
 # third_party/EIPScanner arrives as plain files with no .git.  The binary does
@@ -62,39 +76,43 @@ if(NOT Git_FOUND)
 endif()
 
 # Idempotent: a patch that is already applied reverses cleanly, and configuring
-# twice must not fail.
-execute_process(
-  COMMAND ${GIT_EXECUTABLE} apply --reverse --check ${EIPSCANNER_PATCH}
-  WORKING_DIRECTORY ${EIPSCANNER_ROOT}
-  RESULT_VARIABLE EIPSCANNER_PATCH_PRESENT
-  OUTPUT_QUIET ERROR_QUIET)
-
-if(EIPSCANNER_PATCH_PRESENT EQUAL 0)
-  message(STATUS "  EIPScanner patch    : already applied")
-else()
+# twice must not fail. Each patch is checked on its own, so adding one to a
+# tree that already carries the others works.
+foreach(EIPSCANNER_PATCH ${EIPSCANNER_PATCHES})
+  get_filename_component(EIPSCANNER_PATCH_NAME ${EIPSCANNER_PATCH} NAME_WE)
   execute_process(
-    COMMAND ${GIT_EXECUTABLE} apply ${EIPSCANNER_PATCH}
+    COMMAND ${GIT_EXECUTABLE} apply --reverse --check ${EIPSCANNER_PATCH}
     WORKING_DIRECTORY ${EIPSCANNER_ROOT}
-    RESULT_VARIABLE EIPSCANNER_PATCH_RC
-    ERROR_VARIABLE EIPSCANNER_PATCH_ERR)
-  if(NOT EIPSCANNER_PATCH_RC EQUAL 0)
-    if(EIPSCANNER_PATCH_ERR MATCHES "not a git repository")
-      # A submodule's .git is a file containing a path to the real gitdir. Copy
-      # the tree somewhere that path does not resolve - a container build
-      # context is the usual way - and git sees a repository it cannot open.
+    RESULT_VARIABLE EIPSCANNER_PATCH_PRESENT
+    OUTPUT_QUIET ERROR_QUIET)
+
+  if(EIPSCANNER_PATCH_PRESENT EQUAL 0)
+    message(STATUS "  EIPScanner patch    : ${EIPSCANNER_PATCH_NAME} already applied")
+  else()
+    execute_process(
+      COMMAND ${GIT_EXECUTABLE} apply ${EIPSCANNER_PATCH}
+      WORKING_DIRECTORY ${EIPSCANNER_ROOT}
+      RESULT_VARIABLE EIPSCANNER_PATCH_RC
+      ERROR_VARIABLE EIPSCANNER_PATCH_ERR)
+    if(NOT EIPSCANNER_PATCH_RC EQUAL 0)
+      if(EIPSCANNER_PATCH_ERR MATCHES "not a git repository")
+        # A submodule's .git is a file containing a path to the real gitdir. Copy
+        # the tree somewhere that path does not resolve - a container build
+        # context is the usual way - and git sees a repository it cannot open.
+        message(FATAL_ERROR
+          "Could not apply ${EIPSCANNER_PATCH}:\n${EIPSCANNER_PATCH_ERR}\n"
+          "${EIPSCANNER_ROOT} carries a .git that points outside this tree. In a "
+          "container build, exclude git metadata from the build context - the "
+          "repository's .dockerignore does this; check it was not lost.")
+      endif()
       message(FATAL_ERROR
         "Could not apply ${EIPSCANNER_PATCH}:\n${EIPSCANNER_PATCH_ERR}\n"
-        "${EIPSCANNER_ROOT} carries a .git that points outside this tree. In a "
-        "container build, exclude git metadata from the build context - the "
-        "repository's .dockerignore does this; check it was not lost.")
+        "If the submodule was bumped, check whether upstream fixed this and "
+        "delete the patch, or refresh it against the new revision.")
     endif()
-    message(FATAL_ERROR
-      "Could not apply ${EIPSCANNER_PATCH}:\n${EIPSCANNER_PATCH_ERR}\n"
-      "If the submodule was bumped, check whether upstream fixed this and "
-      "delete the patch, or refresh it against the new revision.")
+    message(STATUS "  EIPScanner patch    : ${EIPSCANNER_PATCH_NAME} applied")
   endif()
-  message(STATUS "  EIPScanner patch    : applied")
-endif()
+endforeach()
 
 # Upstream's options, forced off: we want the library and nothing else.
 set(TEST_ENABLED    OFF CACHE BOOL "" FORCE)

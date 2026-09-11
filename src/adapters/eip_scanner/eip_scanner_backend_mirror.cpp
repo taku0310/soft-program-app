@@ -101,6 +101,8 @@ uint32_t mirror_online() {
 
 uint64_t mirror_forward_opens() { return g_cfg.device_count; }
 uint64_t mirror_losses()        { return g_losses; }
+/* The mirror has no wire, so nothing can arrive out of order on it. */
+uint64_t mirror_out_of_order()  { return 0; }
 
 const eip_scanner_backend_t kMirror = {
     "mirror",
@@ -111,6 +113,7 @@ const eip_scanner_backend_t kMirror = {
     mirror_online,
     mirror_forward_opens,
     mirror_losses,
+    mirror_out_of_order,
 };
 
 }  // namespace

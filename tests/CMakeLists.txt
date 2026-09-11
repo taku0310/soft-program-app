@@ -9,6 +9,7 @@ function(softplc_add_test name)
 endfunction()
 
 softplc_add_test(test_spsc_ring)
+softplc_add_test(test_shm_ownership)
 softplc_add_test(test_process_image)
 softplc_add_test(test_std_fb)
 softplc_add_test(test_adapter_contract)
