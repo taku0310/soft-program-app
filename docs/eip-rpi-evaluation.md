@@ -746,7 +746,7 @@ The I/O port is UDP on a plant network and CIP class 1 authenticates nothing,
 so the reachable precondition is "can send a UDP packet to the PLC". One
 datagram, one dead fieldbus stack, repeatable.
 
-Fixed in `patches/eipscanner-bounds.patch`: reads are bounded and mark the
+Fixed in `patches/eipscanner-hardening.patch`: reads are bounded and mark the
 buffer invalid past the end, the length is checked before the copy rather than
 after, the receive handler drops a datagram that cannot hold what it claims,
 and the boundary our own C code calls across catches anything that still
@@ -825,7 +825,115 @@ once. No corruption, no backwards steps. A PLC sharing a link with bulk traffic
 needs the traffic separated or prioritised; it will not simply degrade quietly.
 
 
-## 17. What could not be measured
+## 17. Acceptance findings: configuration integrity and operations
+
+### A device table pointing at instances the target does not have (C2)
+
+Three wrong instances, all refused on the wire and all visible above it:
+
+| device table | target's answer | what the PLC does |
+|---|---|---|
+| `o2t=199` | ForwardOpen rejected, ext `0x012F` | DEGRADED, 0 of 1 devices, failsafe held |
+| `t2o=199` | ForwardOpen rejected, ext `0x012F` | same |
+| `cfg=199` | ForwardOpen rejected, ext `0x0315` | same |
+
+No false green: the C1 fix already made "zero devices connected" a DEGRADED
+state rather than a healthy one, and that carries here.
+
+**What was missing was the reason.** The rejection reached the log as
+
+```
+[ERROR] Message Router error=0x additional statuses [0x12f]
+```
+
+— with the general status simply absent. `GeneralStatusCodes` is an enum over
+`CipUsint`, so streaming it inserts a *character*, and for every status that
+matters that character is unprintable. Worse, `forwardOpen()` returns an empty
+pointer and drops the response that carried the extended status, so nothing
+above the stack could tell a wrong assembly instance from a powered-down
+drive. Those are the two likeliest causes and they have nothing in common as
+remedies.
+
+Both are fixed in `patches/eipscanner-hardening.patch`, and the scanner now
+decodes the status against the device it belongs to:
+
+```
+WARN ForwardOpen to 10.10.0.1 rejected (cfg=151 o2t=199 t2o=100, 32B/32B,
+     rpi=10000us): the assembly instances requested cannot be used together
+```
+
+### Core and stack built at different ABIs (C3, D3)
+
+They are separate binaries in separate containers, so a rolling update runs
+them at different versions for a while. The shared region carries an ABI
+version and its own size for that window and both attach paths check them —
+but nothing had ever run the check, and an unexercised refusal is
+indistinguishable from no refusal until the day it matters.
+
+`tools/e2e_version_skew.sh` builds the stack a second time from a copy of the
+tree with the ABI constant bumped — a real second build, not a simulation —
+and runs it against the current core:
+
+| | result |
+|---|---|
+| the skewed stack | refused, exit 1: `/softplc.skew.eip: ABI 2/4480 bytes, expected 99/4480` |
+| the core it refused | still scanning, not ready, failsafe applied |
+| the matching stack, started after | attached; back ONLINE |
+
+The third row is what makes it a rolling-update test rather than a version
+check: the window closes cleanly. `tests/test_abi_skew.c` covers the same
+refusal in the suite — wrong version, wrong layout size, and wrong magic —
+by publishing a region by hand, so it needs no second build and runs in CI.
+
+### Health as a value, not as prose (D1)
+
+Everything the runtime knew about itself was in its log. A person could read
+it; an orchestrator could not, and neither could tell "connected" from
+"connected and receiving" without parsing sentences. `softplc --status` reads
+the published region read-only and prints one JSON object:
+
+```json
+{"instance":"plcB","role":"scanner","region":"/softplc.plcB.eipscan","ready":true,
+ "abi_version":3,"layout_bytes":4480,"state":"ONLINE","devices":{"online":1,"total":1},
+ "input_bytes":33,"output_bytes":32,"cycles":605,"forward_opens":1,
+ "connection_losses":0,"out_of_order":0,"last_error":0}
+```
+
+The exit status is the half a probe actually uses: **0** online and fully
+connected, **3** reachable but not ready, **4** nothing published under that
+name. The last distinction matters — a container cannot tell a slow start from
+a crash loop without it. It takes no locks and writes nothing, so it cannot
+perturb the control loop it measures.
+
+Adding it found a dead counter. `assembly_writes` — frames the controller has
+written into the consumed assembly, the difference between a connection that
+exists and one that is being used — was counted in the backend, exposed by an
+accessor, and read by nobody. The field in the status block had always been
+zero. It is published now: 599 writes over 8 seconds on a live link, 0 before
+the controller connects.
+
+### Running out of things (D2)
+
+| condition | before | after |
+|---|---|---|
+| `/dev/shm` full | **SIGBUS, "Bus error", no log line** | exit 1: `cannot reserve 4480 bytes ... No space left on device - /dev/shm is full or too small for this instance` |
+| no file descriptors | exit 1 | exit 1: `sem_open(...) create failed: Too many open files` |
+| `/dev/shm` read-only | exit 1 | exit 1: `shm_open(...) create failed: Read-only file system` |
+
+The first was a real defect and an easy one to meet: `ftruncate` on tmpfs sets
+a size without reserving pages, and `mmap` does not reserve them either, so on
+a full `/dev/shm` both succeed and the **first write** takes SIGBUS. A
+container with a small `--shm-size` is the ordinary way to arrive there, and
+what it got was a signal with no message. `posix_fallocate` after the truncate
+allocates immediately and reports `ENOSPC` as a return value, so running out
+of shared memory is a start-up error with a name on it.
+
+A half-started PLC is worse than one that does not start: the process image
+exists, something reads it, and nothing is writing to it. All three cases now
+fail at start-up, exit non-zero, and name the resource.
+`tools/e2e_resource_limits.sh` asserts exactly that.
+
+## 18. What could not be measured
 
 * **8–24 hour runs.** The longest completed run is 1 hour per RPI. The session
   container is reclaimed on inactivity, so multi-hour runs could not be

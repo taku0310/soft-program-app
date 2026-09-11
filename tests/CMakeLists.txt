@@ -45,7 +45,7 @@ endif()
 if(SOFTPLC_WITH_EIP)
   # These fork and exec the real adapter binary, so they need it built first
   # and need to know where it landed.
-  foreach(t test_eip_ipc test_eip_failsafe_clear test_eip_data_invalid)
+  foreach(t test_eip_ipc test_eip_failsafe_clear test_eip_data_invalid test_abi_skew)
     add_executable(${t} ${t}.c)
     target_link_libraries(${t} PRIVATE ${SOFTPLC_ADAPTERS_LINK})
     target_include_directories(${t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -61,3 +61,14 @@ if(SOFTPLC_WITH_EIP)
     set_tests_properties(${t} PROPERTIES TIMEOUT 120)
   endforeach()
 endif()
+
+# `softplc --status` is the health probe D1 added; it forks the real binary,
+# so it needs it built and needs to know where it landed.
+add_executable(test_status_json test_status_json.c)
+target_link_libraries(test_status_json PRIVATE ${SOFTPLC_ADAPTERS_LINK})
+target_include_directories(test_status_json PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(test_status_json PRIVATE
+  SOFTPLC_PATH="$<TARGET_FILE:softplc>")
+add_dependencies(test_status_json softplc)
+add_test(NAME test_status_json COMMAND test_status_json)
+set_tests_properties(test_status_json PROPERTIES TIMEOUT 60)

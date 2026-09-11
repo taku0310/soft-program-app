@@ -78,6 +78,29 @@ plc_status_t plc_shm_create(plc_shm_t *shm, const char *name, size_t size) {
         return PLC_ERR_IO;
     }
 
+    /* ftruncate on tmpfs sets a size; it does not reserve the pages, and
+     * neither does mmap. On a full /dev/shm both succeed and the *first write*
+     * takes SIGBUS - measured: a PLC starting against a full tmpfs died with
+     * "Bus error" and no message at all. A container with a small --shm-size
+     * is the ordinary way to arrive there.
+     *
+     * posix_fallocate allocates now and reports ENOSPC as a return value, so
+     * running out of shared memory is a start-up error with a name on it
+     * rather than a signal halfway through. It returns the error rather than
+     * setting errno. */
+    const int falloc = posix_fallocate(shm->fd, 0, (off_t)size);
+    if (falloc != 0) {
+        PLC_LOG_ERR("cannot reserve %zu bytes for %s: %s%s", size, name,
+                    strerror(falloc),
+                    falloc == ENOSPC
+                        ? " - /dev/shm is full or too small for this instance"
+                        : "");
+        close(shm->fd);
+        shm->fd = -1;
+        shm_unlink(name);
+        return PLC_ERR_IO;
+    }
+
     shm->base = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, shm->fd, 0);
     if (shm->base == MAP_FAILED) {
         PLC_LOG_ERR("mmap(%s) failed: %s", name, strerror(errno));

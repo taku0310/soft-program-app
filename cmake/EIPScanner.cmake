@@ -29,11 +29,19 @@ endif()
 #                        which showed up as an O->T period of 11 982 us
 #                        against a 10 ms RPI (docs/eip-rpi-evaluation.md).
 #
-#   eipscanner-bounds    Buffer::operator>> read past the end of the datagram,
+#   eipscanner-hardening Two things, both about input nobody controls.
+#
+#                        Buffer::operator>> read past the end of the datagram,
 #                        and the vector overload copied an attacker-supplied
 #                        length without checking it. One malformed UDP
 #                        datagram to port 2222 segfaulted the scanner process
 #                        (SIGSEGV, measured - see the acceptance report).
+#
+#                        And a rejected ForwardOpen threw away the response
+#                        that said why, while the one log line that carried
+#                        the general status streamed it as a character and
+#                        printed nothing. "Wrong assembly instance" and
+#                        "device powered down" looked identical from above.
 #
 # They are carried as patches rather than a fork because a submodule bump
 # should stay a pointer change; if upstream fixes one, `git apply --check`
@@ -52,7 +60,7 @@ endif()
 # --------------------------------------------------------------------------
 set(EIPSCANNER_PATCHES
   ${CMAKE_CURRENT_SOURCE_DIR}/patches/eipscanner-io-timer.patch
-  ${CMAKE_CURRENT_SOURCE_DIR}/patches/eipscanner-bounds.patch)
+  ${CMAKE_CURRENT_SOURCE_DIR}/patches/eipscanner-hardening.patch)
 
 foreach(EIPSCANNER_PATCH ${EIPSCANNER_PATCHES})
   if(NOT EXISTS ${EIPSCANNER_PATCH})

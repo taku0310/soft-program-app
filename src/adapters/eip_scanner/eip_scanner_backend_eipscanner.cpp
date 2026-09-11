@@ -21,10 +21,12 @@
  * thing that only fires when this whole process stops answering.
  */
 #include "softplc/plc_config.h"
+#include "softplc/plc_log.h"
 #include "eip_scanner_backend.h"
 #include "eip_scanner_shm_layout_public.h"
 
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -91,6 +93,7 @@ std::unique_ptr<ConnectionManager> g_cm;
 uint64_t               g_forward_opens = 0;
 uint64_t               g_losses        = 0;
 uint64_t               g_out_of_order  = 0;
+uint64_t               g_rejects       = 0;
 
 constexpr auto kReconnectInterval = std::chrono::seconds(2);
 
@@ -127,6 +130,51 @@ ConnectionParameters make_params(const eip_scanner_device_t &d) {
     return p;
 }
 
+/**
+ * What a rejected ForwardOpen was actually complaining about.
+ *
+ * The extended status is the difference between "your device table is wrong"
+ * and "the drive is powered down", and those have nothing in common as
+ * remedies. Only the codes a misconfigured device table can produce are named
+ * here; anything else is reported as its number, which is still enough to look
+ * up. Values are from CIP Vol.1 and match OpENer's own enum.
+ */
+static const char *forward_open_reason(uint16_t extended) {
+    switch (extended) {
+    case 0x0100: return "connection already in use, or a duplicate ForwardOpen";
+    case 0x0103: return "transport class or trigger combination not supported";
+    case 0x0106: return "ownership conflict - another scanner owns this connection";
+    case 0x0107: return "target connection not found";
+    case 0x0108: return "invalid network connection parameter";
+    case 0x0109: return "invalid connection size";
+    case 0x0110: return "target for the connection is not configured";
+    case 0x0111: return "RPI not supported";
+    case 0x0112: return "RPI outside the range the target accepts";
+    case 0x0113: return "no connection slots left on the target";
+    case 0x0114: return "vendor id or product code in the key does not match";
+    case 0x0115: return "device type in the key does not match";
+    case 0x0116: return "revision in the key does not match";
+    case 0x0119: return "non-listen-only connection not opened";
+    case 0x011A: return "target object is out of connections";
+    case 0x0126: return "configuration assembly is the wrong size";
+    case 0x0127: return "O->T size does not match the target's consuming assembly";
+    case 0x0128: return "T->O size does not match the target's producing assembly";
+    case 0x0129: return "configuration assembly instance does not exist on the target";
+    case 0x012A: return "consumed (O->T) assembly instance does not exist on the target";
+    case 0x012B: return "produced (T->O) assembly instance does not exist on the target";
+    case 0x012F: return "the assembly instances requested cannot be used together";
+    case 0x0311: return "port not available on the target";
+    case 0x0312: return "link address not valid";
+    case 0x0315: return "invalid segment in the connection path - the target "
+                        "does not recognise an assembly instance in it";
+    case 0x0316: return "the connection path and the connection to close "
+                        "do not match";
+    case 0x0317: return "scheduling priority not specified";
+    case 0x0318: return "link address to self is not valid";
+    default:     return NULL;
+    }
+}
+
 /** Open (or reopen) one device's connection.  Failure is not fatal: a scanner
  *  whose third drive is powered down must still run the other three. */
 void connect_device(size_t index) {
@@ -147,8 +195,24 @@ void connect_device(size_t index) {
     auto io = g_cm->forwardOpen(dev.session, make_params(dev.cfg));
     auto ptr = io.lock();
     if (!ptr) {
-        eipScanner::utils::Logger(eipScanner::utils::LogLevel::WARNING)
-            << "ForwardOpen to " << dev.cfg.address << " rejected";
+        /* Name the device, the instances asked for, and what the target said
+         * about them. "0 of 1 devices connected" is true and useless; this is
+         * the line someone can act on without a packet capture. */
+        const uint16_t ext = g_cm->getLastForwardOpenExtendedStatus();
+        const char *why = forward_open_reason(ext);
+        char detail[192];
+        if (why) {
+            snprintf(detail, sizeof(detail), "%s", why);
+        } else {
+            snprintf(detail, sizeof(detail), "extended status 0x%04X", ext);
+        }
+        PLC_LOG_WARN("ForwardOpen to %s rejected (cfg=%u o2t=%u t2o=%u, "
+                     "%uB/%uB, rpi=%uus): %s",
+                     dev.cfg.address, dev.cfg.config_assembly,
+                     dev.cfg.o2t_assembly, dev.cfg.t2o_assembly,
+                     dev.cfg.o2t_bytes, dev.cfg.t2o_bytes, dev.cfg.o2t_rpi_us,
+                     detail);
+        g_rejects++;
         dev.session.reset();
         return;
     }

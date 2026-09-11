@@ -14,6 +14,7 @@
 #include "eip_backend.h"
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #include "softplc/ipc/spsc_ring.h"
@@ -24,6 +25,9 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint8_t         g_mirror[PLC_IPC_MAX_FRAME_BYTES];
 static size_t          g_mirror_len;
 static size_t          g_input_bytes;
+/** The mirror has no originator, so what it counts is its own writes - which
+ *  is the honest answer to "is anything filling the consumed assembly". */
+static _Atomic uint64_t g_mirror_writes;
 
 static plc_status_t lb_init(const eip_backend_config_t *cfg) {
     pthread_mutex_lock(&g_lock);
@@ -43,6 +47,7 @@ static void lb_publish(const uint8_t *data, size_t len) {
     pthread_mutex_lock(&g_lock);
     if (len) memcpy(g_mirror, data, len);
     g_mirror_len = len;
+    atomic_fetch_add(&g_mirror_writes, 1);
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -76,6 +81,12 @@ static int lb_peer_in_run(void) {
     return plc_cfg_bool("SOFTPLC_EIP_MIRROR_IDLE", 0) ? 0 : 1;
 }
 
+/** The mirror writes the image back every exchange, so every fetch is a
+ *  write as far as anyone above can tell. */
+static uint64_t lb_assembly_writes(void) {
+    return atomic_load(&g_mirror_writes);
+}
+
 static const eip_backend_t kLoopbackBackend = {
     .name            = "loopback",
     .init            = lb_init,
@@ -84,6 +95,7 @@ static const eip_backend_t kLoopbackBackend = {
     .fetch_inputs    = lb_fetch,
     .io_connections  = lb_connections,
     .peer_in_run     = lb_peer_in_run,
+    .assembly_writes = lb_assembly_writes,
 };
 
 const eip_backend_t *eip_backend_get(void) { return &kLoopbackBackend; }

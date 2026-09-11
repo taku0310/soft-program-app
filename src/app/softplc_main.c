@@ -36,6 +36,7 @@
 #include "softplc/plc_config.h"
 #include "softplc/plc_log.h"
 #include "softplc/plc_runtime.h"
+#include "softplc_status.h"
 
 #define MAX_ADAPTERS PLC_MAX_BINDINGS
 
@@ -125,6 +126,14 @@ int main(int argc, char **argv) {
         if (strcmp(argv[1], "--list-roles") == 0) {
             list_roles();
             return EXIT_SUCCESS;
+        }
+        /* Health as a value rather than as prose. Kept here rather than in a
+         * separate binary so a container that carries `softplc` carries its
+         * own probe: `softplc --status` and read the exit code. */
+        if (strcmp(argv[1], "--status") == 0) {
+            const char *inst = (argc > 2) ? argv[2]
+                                          : plc_cfg_str("SOFTPLC_INSTANCE", "default");
+            return softplc_print_status(inst);
         }
         if (strcmp(argv[1], "--show-config") == 0) {
             show_config();

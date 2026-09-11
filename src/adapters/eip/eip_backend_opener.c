@@ -372,10 +372,8 @@ static int opener_peer_in_run(void) {
     return atomic_load(&g_peer_in_run);
 }
 
-uint64_t eip_opener_assembly_writes(void);
-
 /** Consumed-assembly updates seen since start-up; published as status. */
-uint64_t eip_opener_assembly_writes(void) {
+static uint64_t opener_assembly_writes(void) {
     return atomic_load(&g_assembly_writes);
 }
 
@@ -387,6 +385,7 @@ static const eip_backend_t kOpenerBackend = {
     .fetch_inputs    = opener_fetch,
     .io_connections  = opener_connections,
     .peer_in_run     = opener_peer_in_run,
+    .assembly_writes = opener_assembly_writes,
 };
 
 const eip_backend_t *eip_backend_get(void) { return &kOpenerBackend; }

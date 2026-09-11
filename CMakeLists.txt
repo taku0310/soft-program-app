@@ -110,6 +110,7 @@ set(SOFTPLC_ADAPTERS_LINK
 # --------------------------------------------------------------------------
 add_executable(softplc
   src/app/softplc_main.c
+  src/app/softplc_status.c
   examples/demo_program.c
 )
 target_include_directories(softplc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples)

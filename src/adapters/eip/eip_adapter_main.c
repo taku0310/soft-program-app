@@ -297,6 +297,13 @@ int main(int argc, char **argv) {
 
         atomic_fetch_add(&map->status.cycles, 1);
         atomic_store(&map->status.io_connections, backend->io_connections());
+        /* Published rather than merely counted: the backend has had this
+         * number since the first version and nothing ever read it, so the
+         * field in the status block stayed zero and said "no controller is
+         * writing" on a perfectly healthy link. */
+        if (backend->assembly_writes) {
+            atomic_store(&map->status.assembly_writes, backend->assembly_writes());
+        }
     }
 
     PLC_LOG_INFO("stopping");

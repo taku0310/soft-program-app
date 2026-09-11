@@ -68,6 +68,16 @@ typedef struct eip_backend {
      * NULL pointer reads as "always RUN".
      */
     int (*peer_in_run)(void);
+
+    /**
+     * @brief Frames the originator has written into the consumed assembly.
+     *
+     * Distinct from ::io_connections, and the distinction is the useful one:
+     * a connection that exists but is not being written to looks identical to
+     * a healthy one from a connection count alone. Optional; NULL reads as
+     * "not counted".
+     */
+    uint64_t (*assembly_writes)(void);
 } eip_backend_t;
 
 /** The backend this binary was built with.  Never NULL. */
