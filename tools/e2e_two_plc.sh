@@ -63,6 +63,7 @@ EOF
 # --- PLC A (10.10.0.1): Adapter role, sends 0xA1 ---
 ip netns exec plcA env SOFTPLC_LOG_LEVEL=info \
   $B/e2e_two_plc adapter plcA 0xA1 1200 > "$S/e2eA.log" 2>&1 &
+PLC_A=$!
 sleep 1
 ip netns exec plcA $B/softplc-eip-adapter plcA vethA > "$S/e2eA-eip.log" 2>&1 &
 sleep 3
@@ -70,6 +71,7 @@ sleep 3
 # --- PLC B (10.10.0.2): Scanner role, sends 0xB2 ---
 ip netns exec plcB env SOFTPLC_LOG_LEVEL=info SOFTPLC_SCANNER_DEVICES="$S/devA.conf" \
   $B/e2e_two_plc scanner plcB 0xB2 500 > "$S/e2eB.log" 2>&1 &
+PLC_B=$!
 sleep 1
 ip netns exec plcB env SOFTPLC_SCANNER_STACK_LOG=info \
   $B/softplc-eip-scanner plcB "$S/devA.conf" > "$S/e2eB-eip.log" 2>&1 &
@@ -88,7 +90,13 @@ if [ "${E2E_RECONNECT:-1}" = "1" ]; then
   ip netns exec plcA $B/softplc-eip-adapter plcA vethA >> "$S/e2eA-eip.log" 2>&1 &
 fi
 
-wait
+# Only the two PLCs finish on their own; the stack processes serve until they
+# are stopped, so waiting on them would hang here forever with the measurement
+# already complete.
+wait "$PLC_A" "$PLC_B"
+for exe in softplc-eip-adapter softplc-eip-scanner; do
+  for pid in $(pgrep -f "$B/$exe" 2>/dev/null); do kill -9 "$pid" 2>/dev/null; done
+done
 
 echo
 echo "================ RESULT ================"
