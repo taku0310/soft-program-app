@@ -68,6 +68,17 @@ sleep 1
 ip netns exec plcA $B/softplc-eip-adapter plcA vethA > "$S/e2eA-eip.log" 2>&1 &
 sleep 3
 
+# The mirror backends answer the same interfaces as the real stacks, so a tree
+# built without them runs this whole script and reports ONLINE with corrupt=0
+# having sent no CIP at all: the loopback mirrors each side's outputs back to
+# its own inputs, and only peer_frames=0 gives it away. Measured on such a
+# build - exit 0, both sides ONLINE, zero ForwardOpens. Refuse it instead.
+if grep -q "backend 'loopback'" "$S/e2eA-eip.log" 2>/dev/null; then
+    echo "REFUSING: $B was built without OpENer, so the adapter is a mirror" >&2
+    echo "  cmake -S . -B $B -DSOFTPLC_WITH_OPENER=ON -DSOFTPLC_WITH_EIPSCANNER=ON" >&2
+    exit 2
+fi
+
 # --- PLC B (10.10.0.2): Scanner role, sends 0xB2 ---
 ip netns exec plcB env SOFTPLC_LOG_LEVEL=info SOFTPLC_SCANNER_DEVICES="$S/devA.conf" \
   $B/e2e_two_plc scanner plcB 0xB2 500 > "$S/e2eB.log" 2>&1 &
@@ -93,7 +104,8 @@ fi
 # Only the two PLCs finish on their own; the stack processes serve until they
 # are stopped, so waiting on them would hang here forever with the measurement
 # already complete.
-wait "$PLC_A" "$PLC_B"
+wait "$PLC_A"; RC_A=$?
+wait "$PLC_B"; RC_B=$?
 for exe in softplc-eip-adapter softplc-eip-scanner; do
   for pid in $(pgrep -f "$B/$exe" 2>/dev/null); do kill -9 "$pid" 2>/dev/null; done
 done
@@ -110,6 +122,28 @@ echo "  corrupt = 0                                        - byte offsets intact
 echo "  the scanner reconnected after the stack was killed mid-run"
 echo
 echo "Reconnect evidence (scanner):"
-grep -c "Open IO connection" "$S/e2eB-eip.log" 2>/dev/null \
-  | sed "s/^/  ForwardOpen count (>1 means it reconnected): /"
+FOPENS=$(grep -c "Open IO connection" "$S/e2eB-eip.log" 2>/dev/null)
+echo "  ForwardOpen count (>1 means it reconnected): $FOPENS"
 echo "Logs: $S/e2e*.log"
+
+# Each side already decides pass or fail against the criteria above and says so
+# on its stderr, which lands in its log. Discarding both and exiting 0 made
+# every run look like a success, including the ones that carried no traffic.
+echo
+FAIL=0
+if grep -q "backend 'mirror'" "$S/e2eB-eip.log" 2>/dev/null; then
+    echo "FAIL: $B was built without EIPScanner - the scanner was a mirror, so"
+    echo "      nothing here crossed a wire. Rebuild with:"
+    echo "      cmake -S . -B $B -DSOFTPLC_WITH_OPENER=ON -DSOFTPLC_WITH_EIPSCANNER=ON"
+    FAIL=1
+fi
+[ "$RC_A" = 0 ] || { echo "FAIL: PLC A (adapter) - $(grep -h 'FAIL' "$S/e2eA.log" | tail -1)"; FAIL=1; }
+[ "$RC_B" = 0 ] || { echo "FAIL: PLC B (scanner) - $(grep -h 'FAIL' "$S/e2eB.log" | tail -1)"; FAIL=1; }
+if [ "${E2E_RECONNECT:-1}" = "1" ] && [ "${FOPENS:-0}" -lt 2 ]; then
+    echo "FAIL: the scanner did not reconnect after the stack was killed"
+    FAIL=1
+fi
+if [ "$FAIL" = 0 ]; then
+    echo "PASS: two soft PLCs exchanged real CIP, and the link survived a stack restart"
+fi
+exit $FAIL
