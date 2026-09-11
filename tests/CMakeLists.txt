@@ -13,6 +13,7 @@ softplc_add_test(test_process_image)
 softplc_add_test(test_std_fb)
 softplc_add_test(test_adapter_contract)
 softplc_add_test(test_plc_config)
+softplc_add_test(test_scan_overrun)
 
 # The ladder logic itself. Needs the examples dir for the POU it exercises.
 add_executable(test_demo_program test_demo_program.c

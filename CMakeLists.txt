@@ -209,6 +209,12 @@ if(SOFTPLC_BUILD_TESTS AND SOFTPLC_WITH_EIP)
   if(SOFTPLC_WITH_EIP_SCANNER)
     add_executable(e2e_two_plc tools/e2e_two_plc.c)
     target_link_libraries(e2e_two_plc PRIVATE ${SOFTPLC_ADAPTERS_LINK})
+
+    # Failsafe content across a real CIP connection loss, which the suite
+    # cannot reach: there the peer is killed, here it stays alive and only
+    # the connection under it goes.
+    add_executable(e2e_cip_failsafe tools/e2e_cip_failsafe.c)
+    target_link_libraries(e2e_cip_failsafe PRIVATE ${SOFTPLC_ADAPTERS_LINK})
   endif()
 
   # Wire-level measurement. Links nothing from this project on purpose: it has

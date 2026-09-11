@@ -92,8 +92,8 @@ wait
 
 echo
 echo "================ RESULT ================"
-grep -h "sent=" "$S/e2eA.log" "$S/e2eB.log" 2>/dev/null
-grep -h "health byte" "$S/e2eB.log" 2>/dev/null
+grep -hE "tag=|exchanges=" "$S/e2eA.log" "$S/e2eB.log" 2>/dev/null
+grep -h "device health" "$S/e2eB.log" 2>/dev/null
 echo
 echo "Pass criteria:"
 echo "  peer_tag is the OTHER side's tag (A=0xA1, B=0xB2) - not a loopback"

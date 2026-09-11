@@ -54,6 +54,17 @@ struct Device {
     std::shared_ptr<SessionInfo> session;
     IOConnection::WPtr     io;
     bool                   connected = false;
+    /** Has *this* connection delivered a T->O frame yet?
+     *
+     * ForwardOpen succeeding is not the same as data flowing: a reconnect
+     * whose UDP path is still broken establishes, then times out again one
+     * connection budget later. In that window ::latest still holds the
+     * previous connection's bytes, so reporting ONLINE on `connected` alone
+     * republishes stale data as fresh. */
+    bool                   has_data = false;
+    /** Has this device ever delivered data, on any connection? Separates
+     *  "lost what we had" from "never had anything". */
+    bool                   ever_data = false;
     /** Last image received while connected; what HOLD reproduces. */
     std::vector<uint8_t>   last_good;
     /** Latest received image, published to the IPC thread under g_lock. */
@@ -134,6 +145,9 @@ void connect_device(size_t index) {
     {
         std::lock_guard<std::mutex> lk(g_lock);
         ptr->setDataToSend(dev.to_send);
+        /* A new connection starts with nothing received on it, whatever the
+         * last one left in ::latest. */
+        dev.has_data = false;
     }
 
     ptr->setReceiveDataListener(
@@ -148,6 +162,8 @@ void connect_device(size_t index) {
                 std::memset(d.latest.data() + n, 0, d.latest.size() - n);
             }
             d.last_good = d.latest;
+            d.has_data  = true;
+            d.ever_data = true;
         });
 
     ptr->setCloseListener([index]() {
@@ -272,7 +288,7 @@ size_t scanner_exchange(const uint8_t *o2t, size_t o2t_len,
         if (c.t2o_offset + c.t2o_bytes > total) continue;
         uint8_t *slice = t2o + c.t2o_offset;
 
-        if (d.connected) {
+        if (d.connected && d.has_data) {
             std::memcpy(slice, d.latest.data(), c.t2o_bytes);
             if (i < health_len) health[i] = EIP_DEVICE_ONLINE;
         } else {
@@ -284,9 +300,13 @@ size_t scanner_exchange(const uint8_t *o2t, size_t o2t_len,
             } else {
                 std::memcpy(slice, d.last_good.data(), c.t2o_bytes);
             }
+            /* Per device, not per process: "lost what we had" only applies
+             * to a device that once had it. A connection that is open but
+             * has not delivered anything yet reads OFFLINE - there is no
+             * fresh data behind it either way. */
             if (i < health_len) {
-                health[i] = g_forward_opens ? EIP_DEVICE_FAILSAFE
-                                            : EIP_DEVICE_OFFLINE;
+                health[i] = d.ever_data ? EIP_DEVICE_FAILSAFE
+                                        : EIP_DEVICE_OFFLINE;
             }
         }
     }
@@ -294,8 +314,12 @@ size_t scanner_exchange(const uint8_t *o2t, size_t o2t_len,
 }
 
 uint32_t scanner_online() {
+    /* Same rule as the health byte: a connection with no data behind it is
+     * not an online device, so the proxy's DEGRADED signal agrees with what
+     * a POU reads. */
+    std::lock_guard<std::mutex> lk(g_lock);
     uint32_t n = 0;
-    for (const auto &d : g_devices) if (d.connected) n++;
+    for (const auto &d : g_devices) if (d.connected && d.has_data) n++;
     return n;
 }
 

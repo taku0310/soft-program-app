@@ -514,6 +514,55 @@ The third is the one that would have failed an acceptance test outright:
 stopping a PLC has to stop its outputs, and a frozen image on a connection the
 controller still trusts is the opposite of that.
 
+### HOLD and CLEAR across a real connection loss (A4)
+
+The suite checks both policies by killing the stack process. That covers the
+IPC boundary — the proxy stops getting answers and applies the policy — but
+not the case the plant actually sees: the peer alive and answering while the
+CIP connection underneath it is gone. `tools/e2e_cip_failsafe.sh` covers that
+one. Two soft PLCs in separate namespaces, Exclusive Owner established, then
+an iptables DROP on UDP 2222 only, held to the end of the run: I/O stops, TCP
+44818 stays up, both processes keep running.
+
+| policy | scans online | scans down | scans that disobeyed the policy |
+|---|---|---|---|
+| HOLD  | 514 | 284 | 0 — every down scan reproduced the last online image |
+| CLEAR | 515 | 284 | 0 — every down scan read all zero |
+
+The check is per scan, not per transition: holding for one scan and then
+drifting is still a wrong image in front of a POU.
+
+**What this found.** Leaving TCP up is what made the defect visible. The
+scanner reconnects over TCP, the ForwardOpen succeeds, and the code set the
+device `connected` at that moment — while no I/O was flowing and the device's
+receive buffer still held the *previous* connection's bytes. The result was
+**16 consecutive scans reporting `EIP_DEVICE_ONLINE` with stale data behind
+them**, 160 ms, exactly one `(4 << 2) × 10 ms` connection budget, repeating
+for every reconnect attempt for as long as the outage lasted. The header had
+always defined `EIP_DEVICE_ONLINE` as "connected, data fresh"; the
+implementation only checked that the ForwardOpen had been accepted.
+
+A device is now ONLINE only once a T→O frame has arrived on the *current*
+connection. Until then the per-device failsafe applies and the health byte
+reads FAILSAFE (or OFFLINE if that device has never delivered data). The
+scanner's `devices_online` count uses the same rule, so the DEGRADED signal
+and what a POU reads agree. Re-run against the unfixed build for comparison:
+
+| build | false-healthy scans during the outage |
+|---|---|
+| before | 16 |
+| after  | 0 |
+
+### A scan overrun loses cycles rather than running fast (A5)
+
+A POU that overruns its cycle re-bases the deadline instead of catching up, so
+the runtime loses cycles rather than firing a burst of back-to-back scans at
+faster than real time. `dt` carries the true elapsed time, so IEC timers stay
+correct in real time across the overrun. `tests/test_scan_overrun.c` pins it:
+a 2000 µs cycle with a POU sleeping 6000 µs, 100 scans — overruns counted,
+no catch-up burst, summed `dt` within 10 % of wall clock, and a `TON(200 ms)`
+still completing at 195–215 ms of accumulated `dt`.
+
 ## 15. Acceptance findings: configuration errors and unclean recovery
 
 ### A size mismatch is rejected on the wire, and was invisible above it
