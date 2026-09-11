@@ -429,7 +429,92 @@ already an exact multiple of the 10 ms tick. The default therefore stays at
 10 ms, and the option exists for deployments that need sub-10 ms and have
 accepted what §11 says about them.
 
-## 13. What could not be measured
+## 13. Acceptance findings: what the link actually survives
+
+Every figure above was taken on a link that never dropped a packet, so "zero
+UDP loss across 3.5 million packets" described the rig, not the tolerance.
+Injected with `LOSS_PCT` and `BLACKOUT_MS` (`tools/eip_rpi_eval.sh`), 180 s per
+condition, RPI 10 ms, connection timeout multiplier 2 — a **160 ms** budget.
+
+### Independent packet loss is not what breaks it
+
+| loss | packets lost | delivered T→O / O→T | ForwardOpen | **connection timeouts** |
+|---|---|---|---|---|
+| 0.5 % | 83 / 87 | 98.0 % / 99.5 % | 1 | **0** |
+| 2 % | 392 / 353 | 96.3 % / 98.0 % | 1 | **0** |
+| 5 % | 906 / 865 | 93.3 % / 95.2 % | 1 | **0** |
+| 10 % | 1 725 / 1 778 | 88.6 % / 90.1 % | 1 | **0** |
+| 20 % | 3 483 / 3 646 | 78.9 % / 79.7 % | 1 | **0** |
+
+**Not one reconnection at any rate, up to and including 20 % loss in both
+directions.** The connection holds because the budget is 16 RPIs and the losses
+are independent: sixteen in a row at p = 0.2 is about 7 × 10⁻¹², which does not
+happen in 18 000 frames. What degrades is the freshness of the process image —
+at 20 % loss a fifth of the scans read a held value — and that is a control
+question, not a connectivity one.
+
+### Outage duration is what breaks it, exactly at the budget
+
+A total outage, repeated every 5 s:
+
+| outage | ForwardOpen | **connection timeouts** | verdict |
+|---|---|---|---|
+| 100 ms | 1 | **0** | survives — inside the 160 ms budget |
+| 300 ms | 41 | **41** | drops on every single outage |
+| 1000 ms | 37 | **36** | drops on every single outage |
+
+The boundary sits where CIP says it should, with no ambiguity: below the budget
+nothing happens at all, above it the connection is lost every time and has to be
+rebuilt. 100 ms of total silence is invisible; 300 ms costs a ForwardOpen.
+
+**So the knob for link robustness is the timeout multiplier, not the RPI.** A
+plant whose network glitches for 300 ms needs `tmo_mult` raised — at a 10 ms
+RPI, 3 gives 320 ms and 4 gives 640 ms — and lowering the RPI makes it *worse*,
+because the budget is a multiple of the RPI.
+
+### The same loss at each RPI
+
+| RPI | budget | packets lost | ForwardOpen | connection timeouts |
+|---|---|---|---|---|
+| 5 ms | 80 ms | 932 / 1 803 | 2 | **1** |
+| 10 ms | 160 ms | 906 / 865 | 1 | **0** |
+| 50 ms | 800 ms | 183 / 147 | 1 | **0** |
+
+5 % loss costs a reconnection at a 5 ms RPI and none at 10 ms or 50 ms — the
+same ordering the idle measurements gave, for the same reason: the budget
+shrinks with the RPI while the host's stalls do not.
+
+(T→O delivers 46.6 % at the 5 ms RPI because `SOFTPLC_OPENER_TICK_MS` defaults
+to 10, so the Adapter serves 10 ms as §8.1 describes. That is the default
+behaviour under test, not a fault in the run.)
+
+### Not measured
+
+**Delay, jitter and packet reordering could not be injected.** This kernel is
+built with `CONFIG_NET_SCH_NETEM` unset, so `tc qdisc add ... netem` fails with
+"Specified qdisc kind is unknown" however present the `tc` binary is; iptables
+has no equivalent. Ten conditions were run against netem and failed in a second
+each before this was diagnosed. Reordering in particular is worth testing on a
+kernel that supports it, because the CIP sequence number is what should absorb
+it and nothing here has exercised that path.
+
+## 14. Acceptance findings: safe states
+
+Three questions asked from the plant's side rather than the code's, all three
+answered wrong before this, all three now fixed and covered by tests. See the
+commit "A stopped or idle peer must stop the outputs".
+
+| question | behaviour found | now |
+|---|---|---|
+| Controller in PROGRAM mode (CIP run/idle IDLE) | outputs kept being driven from data the controller had declared invalid | failsafe policy applied at once |
+| No controller connected at all | the adapter answered every scan with the empty assembly, and because the answer was prompt the staleness clock reset every scan, so **the failsafe could never fire** | exchange refused, failsafe applied |
+| PLC stopped cleanly | the adapter kept the connection up and produced the last output image indefinitely — measured at **493 identical frames over five seconds**, with the controller seeing a healthy connection | production stops 2.0 s after the PLC; the far end's timeout then fires |
+
+The third is the one that would have failed an acceptance test outright:
+stopping a PLC has to stop its outputs, and a frozen image on a connection the
+controller still trusts is the opposite of that.
+
+## 15. What could not be measured
 
 * **8–24 hour runs.** The longest completed run is 1 hour per RPI. The session
   container is reclaimed on inactivity, so multi-hour runs could not be
@@ -439,6 +524,8 @@ accepted what §11 says about them.
   third-party scanner has driven this Adapter and no real device has been driven
   by this Scanner.
 * **IPC totals for four conditions** (§7).
+* **Delay, jitter and reordering** — `CONFIG_NET_SCH_NETEM` is unset on this
+  kernel, so netem is unavailable and iptables offers no equivalent (§13).
 * **Scheduling latency of the kernel itself** — no `perf`, and
   `/proc/<pid>/schedstat` run-queue delay is the closest available proxy; it is
   reported per second, not per event, so it cannot be attributed to an
