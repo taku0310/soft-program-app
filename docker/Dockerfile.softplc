@@ -1,0 +1,98 @@
+# syntax=docker/dockerfile:1
+# SPDX-License-Identifier: Apache-2.0
+#
+# The whole soft PLC in one image: the core, both EtherNet/IP stacks, and an
+# entrypoint that starts the core plus whichever single stack the configured
+# role calls for.
+#
+# Use this when the PLC is *either* a device on someone else's network *or* an
+# originator driving remote I/O, which is the ordinary case.  It is not a way
+# to run both roles at once: CIP class 1 I/O uses UDP 2222 at both ends, a
+# container is one network namespace, and the two roles in one namespace
+# receive each other's traffic.  Both roles still means two namespaces - the
+# three-service docker-compose.yml beside this file.
+#
+# What is *not* traded away is the crash-containment boundary.  The stack runs
+# as its own process against the core's shared memory exactly as it does when
+# they are separate containers (ADR 0002, 0003, 0010); one container is a
+# packaging decision, not a memory-sharing one.  Linking the stack into the
+# core is the thing that would throw that away, and this does not do it.
+
+FROM debian:bookworm-slim AS build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY CMakeLists.txt ./
+COPY cmake        ./cmake
+COPY include      ./include
+COPY src          ./src
+COPY examples     ./examples
+COPY tests        ./tests
+COPY tools        ./tools
+COPY third_party  ./third_party
+# Needed by cmake/EIPScanner.cmake, which patches the vendored stack at
+# configure time. Without it the configure fails, not the build.
+COPY patches      ./patches
+
+# Fail loudly rather than silently falling back to a stack-free backend: an
+# image built from missing submodules would come up, serve nothing, and look
+# healthy.
+RUN test -f third_party/OpENer/source/src/opener_api.h \
+        && test -f third_party/EIPScanner/src/ConnectionManager.h \
+    || (echo "third_party is empty - run 'git submodule update --init --recursive' before building" >&2; exit 1)
+
+# Both stacks, because the role is a runtime setting: the image cannot know
+# which one it will be asked for.  The tests run here for the same reason they
+# run in the core image - this is the only configuration that links both, so
+# it is the only place a conflict between them would show up.
+RUN cmake -S . -B build \
+        -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+        -DSOFTPLC_WITH_EIP=ON \
+        -DSOFTPLC_WITH_OPENER=ON \
+        -DSOFTPLC_WITH_EIP_SCANNER=ON \
+        -DSOFTPLC_WITH_EIPSCANNER=ON \
+        -DSOFTPLC_BUILD_TESTS=ON \
+    && cmake --build build -j"$(nproc)" \
+    && ctest --test-dir build --output-on-failure
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libstdc++6 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --no-create-home softplc
+
+COPY --from=build /src/build/softplc              /usr/local/bin/softplc
+COPY --from=build /src/build/softplc-eip-adapter  /usr/local/bin/softplc-eip-adapter
+COPY --from=build /src/build/softplc-eip-scanner  /usr/local/bin/softplc-eip-scanner
+COPY --chmod=0755 docker/entrypoint.sh            /usr/local/bin/softplc-entrypoint
+
+# No VOLUME for /dev/shm, unlike the split images.  There it declares the
+# tmpfs the two containers share; here both processes are inside this one, so
+# the runtime's own /dev/shm serves and an anonymous volume would only mask
+# it.  Sharing a container also means sharing a uid, so the shared memory the
+# core creates 0600 is readable by the stack with none of the CAP_DAC_OVERRIDE
+# the split deployment needs.
+#
+# Mount a config file at /etc/softplc/softplc.conf to configure by file; with
+# nothing mounted the image is configured entirely from the environment,
+# exactly as the split images always were.
+
+# Relevant to role=adapter only.  A Scanner opens outbound connections and
+# listens on nothing, so in that role none of this is published.
+EXPOSE 44818/tcp 44818/udp 2222/udp
+
+# No SOFTPLC_* defaults are set here, deliberately.
+#
+# The environment wins over a mounted config file - which is what makes
+# `docker run -e` and a compose `environment:` block work - so a default baked
+# in here would not be a default at all: it would silently override whatever
+# the operator wrote in /etc/softplc/softplc.conf.  The binary's own defaults
+# are the same values, and `softplc --show-config` prints them.
+
+USER 10001
+
+ENTRYPOINT ["/usr/local/bin/softplc-entrypoint"]

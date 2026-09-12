@@ -1,0 +1,955 @@
+# EtherNet/IP RPI evaluation: 5 ms / 10 ms / 50 ms
+
+What this answers: **how many class 1 I/O packets this soft PLC actually
+exchanged at each RPI, and how many times the connection timed out.** Every
+number below was measured; nothing is extrapolated. Where something could not
+be measured it says so.
+
+Produced by `tools/eip_rpi_eval.sh` (one condition end to end),
+`tools/eip_probe.c` (wire-level cadence), `tools/eip_sampler.py` (CPU, memory,
+scheduler, interface counters) and `tools/eip_summarise.py` (tables).
+
+## 1. Test environment
+
+| | measured value |
+|---|---|
+| CPU | Intel Xeon @ 2.80 GHz, **4 vCPU** |
+| Memory | 16 GB |
+| Kernel | `6.18.44-fc-v24`, **PREEMPT_DYNAMIC** — not PREEMPT_RT |
+| Platform | Firecracker microVM, containerised |
+| Link | `veth` pair between two network namespaces |
+| Clock | `CLOCK_MONOTONIC`, `AF_PACKET` capture on the Adapter-side interface |
+
+The two roles are in separate network namespaces because CIP class 1 uses UDP
+2222 at **both** ends; in one namespace each endpoint receives its own
+transmissions.
+
+**This is a general-purpose cloud VM, not control hardware.** Nothing here
+transfers to a PREEMPT_RT machine without re-measuring; `tools/eip_rpi_eval.sh`
+is in the tree so it can be re-run there.
+
+## 2. Test conditions
+
+Held constant across every run, so that a difference is attributable to the RPI:
+
+| | value |
+|---|---|
+| Connection timeout multiplier | 2 → `(4 << 2)` = **×16 of the RPI** |
+| PLC scan period | 10 000 µs |
+| Image size | 32 bytes each direction |
+| Devices | 1 |
+| CPU allocation | none pinned; 4 vCPU shared |
+
+CIP defines the connection timeout as a multiple of the RPI, so holding the
+*multiplier* is what "same conditions" means here. The absolute budget
+therefore scales: **80 ms / 160 ms / 800 ms**.
+
+Load conditions: `none` (idle), `cpu` (`stress-ng --cpu 4 --cpu-load 50`),
+`high` (`stress-ng --cpu 8 --cpu-load 100`). Measured host CPU: 1.6–2.5 %,
+55.0–55.5 %, 98.2–98.3 %.
+
+## 3. Adapter / Scanner configuration
+
+Decoded from the packet capture, not from configuration files:
+
+```
+RegisterSession                        → session handle 0x00000001
+Forward_Open (service 0x54)
+    conn_serial=0x0001  vendor=1  originator_sn=0x534F4654
+    timeout_multiplier=2  ((4<<2) = x16)
+    O->T  RPI=10000us  size=38B  Point-to-point  Scheduled  owner=Exclusive
+    T->O  RPI=10000us  size=34B  Point-to-point  Scheduled  owner=Exclusive
+    transport/trigger=0x01  (Class 1, cyclic)
+    connection_path = 20 04 24 97 2C 96 2C 64
+                      Assembly class 0x04, config 151, O->T 150, T->O 100
+Forward_Open reply
+    GENERAL STATUS = 0 (success)
+    O->T CID=0x42CA0013   T->O CID=0x71300001
+```
+
+**Exclusive Owner is confirmed on the wire** — the ownership bit is clear in
+both `NetworkConnectionParameters`. Establishment took **0.8 ms** from the
+first TCP SYN to the Forward_Open reply.
+
+O→T is 38 B = 32 data + 4 run/idle header + 2 sequence count; T→O is
+34 B = 32 + 2, the target producing without a run/idle header.
+
+## 4. Results — how many packets, how many timeouts
+
+`Expected` is `test duration / configured RPI`, per direction.
+
+### 10 minutes, idle
+
+| RPI | Expected | T→O received | O→T received | **UDP packets lost** | **CIP connection timeouts** | ForwardOpen |
+|---|---|---|---|---|---|---|
+| 5 ms | 120 000 | 58 778 | 100 573 | **0** | **1** | 2 |
+| 10 ms | 60 000 | 58 881 | 50 075 | **0** | **0** | 1 |
+| 50 ms | 12 000 | 12 000 | 11 271 | **0** | **0** | 1 |
+
+### 1 hour, idle
+
+| RPI | Expected | T→O received | O→T received | **UDP packets lost** | **CIP connection timeouts** | ForwardOpen |
+|---|---|---|---|---|---|---|
+| 5 ms | 720 000 | 352 519 | 603 790 | **0** | **6** | 7 |
+| 10 ms | 360 000 | 353 942 | 301 598 | **0** | **0** | 1 |
+| 50 ms | 72 000 | 71 995 | 67 722 | **0** | **0** | 1 |
+
+Timeout rate against expected packet count: 5 ms → **0.00083 %**;
+10 ms and 50 ms → **0 %**.
+
+### 10 minutes, under CPU load
+
+| RPI | load | host CPU | **CIP connection timeouts** | ForwardOpen | worst cycle |
+|---|---|---|---|---|---|
+| 5 ms | 50 % | 55.2 % | **2** | 3 | 69 660 µs |
+| 5 ms | 100 % | 98.3 % | **0** | 1 | 57 676 µs |
+| 10 ms | 50 % | 55.5 % | **0** | 1 | 97 585 µs |
+| 10 ms | 100 % | 98.2 % | **0** | 1 | 62 208 µs |
+| 50 ms | 50 % | 55.0 % | **0** | 1 | 146 861 µs |
+| 50 ms | 100 % | 98.3 % | **0** | 1 | 61 321 µs |
+
+**Not a single UDP packet was lost in any of the twelve runs.** The
+encapsulation sequence number is contiguous throughout; every observed gap is a
+sender that did not send, never a packet that did not arrive. Interface RX/TX
+errors and drops, and UDP `InErrors` / `RcvbufErrors`, were zero in all runs.
+
+## 5. Cycle and jitter statistics
+
+All values µs, measured at the interface.
+
+| RPI | load | dir | mean | P50 | P95 | P99 | P99.9 | max | σ |
+|---|---|---|---|---|---|---|---|---|---|
+| 5 ms | none | T→O | **10 603** | 9 970 | 10 965 | 19 205 | 101 285 | 131 960 | 5 871 |
+| 5 ms | none | O→T | **6 207** | 5 900 | 6 815 | 9 150 | 33 060 | 131 950 | 3 957 |
+| 10 ms | none | T→O | **10 190** | 10 195 | 10 840 | 11 135 | 31 790 | 129 242 | 1 431 |
+| 10 ms | none | O→T | **11 982** | 11 780 | 12 730 | 13 245 | 34 040 | 99 033 | 1 397 |
+| 50 ms | none | T→O | **50 002** | 50 720 | 51 620 | 52 860 | 71 795 | 117 147 | 3 361 |
+| 50 ms | none | O→T | **53 236** | 53 040 | 55 250 | 56 010 | 71 735 | 207 160 | 2 096 |
+
+1-hour runs, idle:
+
+| RPI | dir | mean | P99 | P99.9 | max |
+|---|---|---|---|---|---|
+| 5 ms | T→O | 10 187 | 11 085 | 29 125 | 76 860 |
+| 5 ms | O→T | 5 946 | 6 740 | 17 080 | 76 824 |
+| 10 ms | T→O | 10 171 | 11 015 | 26 155 | 118 342 |
+| 10 ms | O→T | 11 936 | 12 935 | 28 635 | 118 298 |
+| 50 ms | T→O | 50 004 | 52 335 | 71 575 | 279 018 |
+| 50 ms | O→T | 53 158 | 55 730 | 75 585 | 277 509 |
+
+Two systematic deviations, present at every RPI and under every load:
+
+* **T→O at a 5 ms RPI runs at 10 ms** — exactly 2×.
+* **O→T runs long by a factor that shrinks as the RPI grows**: ×1.24 at 5 ms,
+  ×1.20 at 10 ms, ×1.065 at 50 ms.
+
+Both are implementation defects, root-caused in §8.
+
+## 6. CPU, memory and network
+
+| run | host CPU | Adapter stack | Scanner stack | max run-queue delay | Adapter RSS | Scanner RSS |
+|---|---|---|---|---|---|---|
+| 5 ms idle, 10 min | 2.5 % | 1.8 % | 3.1 % | 34 070 µs/s | 2 024 → 2 024 kB | 4 248 → 4 316 kB |
+| 10 ms idle, 10 min | 2.2 % | 1.5 % | 2.5 % | 2 183 µs/s | no change | no change |
+| 50 ms idle, 10 min | 1.7 % | 1.0 % | 1.9 % | 2 840 µs/s | no change | no change |
+| 5 ms idle, **1 h** | 2.2 % | 1.8 % | 2.9 % | 3 975 µs/s | no change | 4 224 → 4 292 kB |
+| 10 ms idle, **1 h** | 2.0 % | 1.6 % | 2.5 % | 3 378 µs/s | no change | no change |
+| 50 ms idle, **1 h** | 1.6 % | 1.0 % | 1.9 % | 4 126 µs/s | no change | no change |
+
+Threads: PLC core 1, each stack process 2.
+
+**No memory leak.** The scanner's +68 kB appears only in the RPI 5 ms runs — the
+ones that reconnect — and is the *same* +68 kB after 1 hour as after 10 minutes,
+across six times the duration and six reconnects instead of one. It is a
+one-time allocation on the reconnect path, not growth.
+
+**The stalls are not our CPU.** Worst cycles of 117–279 ms occur while the host
+is 1.6–2.5 % busy and all four of our processes together use under 6 %.
+
+## 7. The IPC leg (PLC core ↔ stack process)
+
+Separately measured, because a late frame on the wire could originate on either
+side of the shared-memory boundary.
+
+| run | exchanges | IPC timeouts | rate | mid-run failsafe activations |
+|---|---|---|---|---|
+| 5 ms, 1 h | 364 255 / 364 293 | 245 / 207 | 0.1 % | **0** |
+| 10 ms, 1 h | 364 265 / 364 246 | 235 / 254 | 0.1 % | **0** |
+| 50 ms, 1 h | 364 204 / 364 217 | 296 / 283 | 0.1 % | **0** |
+
+(Two figures per cell: Adapter-side core / Scanner-side core.)
+
+The IPC leg times out on ~0.1 % of scans at every RPI — a flat rate,
+independent of the RPI, which is what it should be: this leg runs at the scan
+period, not the RPI. **No failsafe was applied mid-run in any condition**; the
+one activation per run in the logs is the start-up window before the peer
+attaches.
+
+So the IPC leg is not where the RPI-dependent behaviour comes from. It is
+absorbed entirely by holding the last good image, as designed.
+
+The three idle 10-minute runs and `short_rpi5000_cpu` have no IPC totals: the
+driver killed the cores before they printed them. Fixed in `ea159a5`; those
+four conditions are missing this one metric and nothing else.
+
+## 8. Root causes
+
+### 8.1 A 5 ms RPI is quantised to 10 ms by the Adapter
+
+`src/adapters/eip/opener_conf/opener_user_conf.h` sets
+
+```c
+static const MilliSeconds kOpenerTimerTickInMilliSeconds = 10;
+```
+
+and OpENer's `ConnectionObjectSetExpectedPacketRate()`
+(`third_party/OpENer/source/src/cip/cipconnectionobject.c:459`) rounds the
+requested RPI **up** to a multiple of it:
+
+```
+remainder = 5000 % 10000 = 5000      (non-zero)
+expected_packet_rate = 5000/1000 + (10 - 5000/1000) = 5 + 5 = 10 ms
+```
+
+Measured T→O mean at a 5 ms RPI: **10 168 µs**. At 10 ms the remainder is zero,
+no rounding occurs, and the measured mean is 10 190 µs. At 50 ms, 50 002 µs.
+
+This is legitimate CIP behaviour — a target may serve a coarser rate than
+requested — but with this constant **the Adapter role cannot produce faster
+than 10 ms**, whatever the scanner asks for.
+
+### 8.2 The Scanner loses real time on every tick
+
+`third_party/EIPScanner/src/IOConnection.cpp:96`:
+
+```cpp
+auto sinceLastHandle =
+    std::chrono::duration_cast<std::chrono::milliseconds>(now - _lastHandleTime);
+auto periodInMicroS = sinceLastHandle.count() * 1000;
+```
+
+Elapsed time is truncated to whole milliseconds, the remainder is discarded,
+and `_lastHandleTime = now` is then set from the *untruncated* clock — so the
+remainder is lost permanently rather than carried forward. That value drives
+both:
+
+* `_o2tTimer`, the send cadence → **O→T is sent late**;
+* `_connectionTimeoutCount` → **the connection timeout fires later than the
+  configured `(4 << mult) × RPI` in real time.**
+
+The second is the safety-relevant one: the configured timeout is not the
+timeout in effect.
+
+### 8.3 Why the connection drops at 5 ms and not at 10 ms
+
+The CIP budget scales with the RPI: 80 ms, 160 ms, 800 ms.
+
+Within a surviving connection generation at a 5 ms RPI over 1 hour, the largest
+observed silence was **76 860 µs** — just under the 80 ms budget. The stalls
+that exceeded 80 ms are precisely the six that killed the connection.
+
+At 10 ms the budget is 160 ms and the worst observed silence was 118 342 µs; at
+50 ms the budget is 800 ms against a worst of 279 018 µs. Both survive with
+margin.
+
+**So the boundary is not the RPI itself but the host's scheduling tail against
+the budget the RPI implies.** This host's tail reaches ~130 ms idle and ~280 ms
+occasionally; an 80 ms budget sits inside it, a 160 ms budget mostly outside it,
+an 800 ms budget far outside.
+
+### 8.4 Availability at RPI 5 ms over one hour
+
+Derived from the connection generations on the wire:
+
+| | |
+|---|---|
+| Connection generations | 7 |
+| Reconnects | 6 |
+| Generation lifetimes | 82, 28, 1 078, 208, 1 468, 718, 5.3 s |
+| **Time with a live connection** | **3 587.6 s of 3 600 s = 99.66 %** |
+| Total outage | 12.4 s |
+| Mean recovery per event | ≈ 2.1 s |
+
+Recovery is automatic every time; no reconnect required intervention and none
+failed. But a 2-second outage six times an hour is a plant stoppage, not a
+statistic.
+
+## 9. CPU load did not make it worse — it made it better
+
+This was the most counterintuitive result and it is consistent across all three
+RPIs.
+
+| RPI | idle worst cycle | 50 % load | 100 % load |
+|---|---|---|---|
+| 5 ms | 131 960 µs | 69 660 µs | **57 676 µs** |
+| 10 ms | 129 242 µs | 97 585 µs | **62 208 µs** |
+| 50 ms | 117 147 µs | 146 861 µs | **61 321 µs** |
+
+At a 5 ms RPI, connection timeouts went 1 (idle) → 2 (50 %) → **0 (100 %)**.
+
+A busy CPU does not enter deep idle states, so the wake-from-idle latency that
+dominates this host's tail disappears. The same effect was measured earlier in
+this project from the other side of the IPC boundary (ADR 0009: load measured
+~19× faster than idle at the median).
+
+**Consequence for anyone tuning this: an idle bench is the pessimistic case
+here, not the optimistic one.** Tuning against a loaded system and assuming
+idle will be safer is backwards.
+
+## 10. Verdict per RPI
+
+### RPI 5 ms — **not usable as it stands**
+
+* The Adapter physically cannot produce at 5 ms with this build; it produces at
+  10 ms (§8.1). The requested rate is not being served.
+* 6 connection timeouts and 6 reconnects in 1 hour idle; 12.4 s of accumulated
+  outage; 99.66 % availability.
+* The 80 ms CIP budget lies inside this host's scheduling tail.
+
+### RPI 10 ms — **usable on this host, with a caveat**
+
+* **0 connection timeouts** in 1 hour idle and in all load conditions.
+* 0 packets lost out of 353 942 + 301 598.
+* T→O cadence accurate to +1.9 %.
+* Caveat: **O→T runs at 11.94 ms, not 10 ms** (§8.2). The link is stable, but
+  the actual output update rate is 19 % slower than configured.
+* Worst silence 118 ms against a 160 ms budget — 26 % margin. That is thinner
+  than it looks on a host whose tail reached 279 ms in another run.
+
+### RPI 50 ms — **usable with real margin**
+
+* 0 connection timeouts, 0 packets lost, in every condition.
+* T→O accurate to 0.004 %.
+* O→T runs at 53.2 ms (+6.5 %) — the same defect, proportionally smallest here.
+* Worst silence 279 ms against an 800 ms budget — 65 % margin.
+
+## 11. Recommended RPI
+
+**On this hardware and this build, the smallest RPI that can be recommended is
+10 ms — and 50 ms is what should be used where the application allows it.**
+
+| | RPI | reason |
+|---|---|---|
+| Conservative | **50 ms** | 65 % margin against the observed scheduling tail; zero timeouts in every condition measured |
+| Performance | **10 ms** | zero timeouts measured, but only 26 % margin, and the output rate is really 11.9 ms |
+| Not recommended | 5 ms | the Adapter serves it at 10 ms anyway, and the implied 80 ms budget is inside the host's stall distribution |
+
+Asking for 5 ms today buys nothing over asking for 10 ms — the Adapter produces
+at 10 ms either way — while halving the timeout budget. **It is strictly worse
+than 10 ms on this platform.**
+
+### Current bottleneck
+
+In order of what actually limits the achievable RPI:
+
+1. **Host scheduling tail** (~130 ms idle, ~280 ms observed) on a
+   non-PREEMPT_RT kernel in a shared microVM. This sets the floor and nothing in
+   the application can move it.
+2. **`kOpenerTimerTickInMilliSeconds = 10`** — a hard 10 ms floor on the
+   Adapter's production rate.
+3. **The Scanner's millisecond truncation** — inflates both the send period and
+   the connection timeout.
+
+Note the ordering: even with both defects fixed, item 1 remains, and it is the
+reason a 5 ms RPI is not a realistic target on this class of machine.
+
+## 12. Fixing the two defects — measured, not proposed
+
+Both were fixed and the same conditions re-measured. `SOFTPLC_OPENER_TICK_MS=1`
+plus `patches/eipscanner-io-timer.patch`.
+
+### The cadence is fully repaired
+
+10 minutes, idle. Three variants, so the two scanner-side changes can be told
+apart:
+
+| RPI | dir | baseline | tick fix + µs fix | **+ overshoot fix** | target |
+|---|---|---|---|---|---|
+| 5 ms | T→O | 10 603 µs | **5 007 µs** | 5 011 µs | 5 000 |
+| 5 ms | O→T | 6 207 µs | 6 053 µs | **5 001 µs** | 5 000 |
+| 10 ms | T→O | 10 190 µs | **10 011 µs** | 10 011 µs | 10 000 |
+| 10 ms | O→T | 11 982 µs | 12 042 µs | **10 002 µs** | 10 000 |
+| 50 ms | T→O | 50 002 µs | 50 000 µs | — | 50 000 |
+| 50 ms | O→T | 53 236 µs | 52 012 µs | — | 50 000 |
+
+Frames delivered against the configured RPI went from 49.15 % / 84.11 % to
+**99.79 % / 99.98 %** at a 5 ms RPI.
+
+**The first hypothesis was wrong and the measurement is what caught it.** The
+millisecond truncation (§8.2) is real, but fixing it alone left the 10 ms O→T
+period at 12 042 µs — no better than the 11 982 µs baseline. The dominant error
+was a second defect in the same function: `_o2tTimer = 0` on send, discarding
+the overshoot past the deadline instead of subtracting the period, so the mean
+period was `RPI + mean overshoot`. Changing it to `_o2tTimer -= _o2tAPI` is what
+moved 11 982 µs to 10 002 µs.
+
+The truncation fix is kept regardless: it also governs `_connectionTimeoutCount`,
+so without it the configured connection timeout is not the one in effect.
+
+### The connection still drops at 5 ms
+
+1 hour, idle, RPI 5 ms:
+
+| | baseline | all three fixes |
+|---|---|---|
+| T→O packets | 352 519 | **717 652** |
+| T→O mean period | 10 187 µs | **5 009 µs** |
+| O→T mean period | 5 946 µs | **5 002 µs** |
+| UDP packets lost | 0 | 0 |
+| **CIP connection timeouts** | **6** | **3** |
+| Reconnects | 6 | 3 |
+| Connection lifetimes | 82, 28, 1078, 208, 1468, 718, 5 s | 632, 1438, 993, 530 s |
+| **Availability** | **99.66 %** | **99.83 %** |
+| Total outage | 12.4 s | 6.2 s |
+
+Halved, not eliminated. This is the expected result and it is worth stating
+plainly: **the fixes repair cadence, not stall tolerance.** The CIP budget at a
+5 ms RPI is still 80 ms, and this host still stalls past 80 ms — the worst
+silence in the fixed run was 116 436 µs. The drop rate roughly halved because
+T→O now arrives twice as often, so a stall must cover twice as many expected
+frames before the timeout counter expires; the stalls themselves are unchanged.
+
+**So the recommendation in §11 does not change.** 10 ms remains the smallest
+RPI that can be recommended on this hardware. What the fixes change is that a
+requested RPI is now actually served: before them, configuring 10 ms produced
+output at 11.98 ms and configuring 5 ms produced it at 10 ms.
+
+### Cost, and why the tick is an option rather than a new default
+
+`SOFTPLC_OPENER_TICK_MS=1` runs OpENer's connection manager ten times as often:
+
+| RPI | tick 10 ms | tick 1 ms |
+|---|---|---|
+| 5 ms | 1.82 % | 4.29 % |
+| 10 ms | 1.54 % | 3.82 % |
+| 50 ms | 1.00 % | 3.32 % |
+
+At a 50 ms RPI that is 2.3 points of CPU for nothing at all — the RPI is
+already an exact multiple of the 10 ms tick. The default therefore stays at
+10 ms, and the option exists for deployments that need sub-10 ms and have
+accepted what §11 says about them.
+
+## 13. Acceptance findings: what the link actually survives
+
+Every figure above was taken on a link that never dropped a packet, so "zero
+UDP loss across 3.5 million packets" described the rig, not the tolerance.
+Injected with `LOSS_PCT` and `BLACKOUT_MS` (`tools/eip_rpi_eval.sh`), 180 s per
+condition, RPI 10 ms, connection timeout multiplier 2 — a **160 ms** budget.
+
+### Independent packet loss is not what breaks it
+
+| loss | packets lost | delivered T→O / O→T | ForwardOpen | **connection timeouts** |
+|---|---|---|---|---|
+| 0.5 % | 83 / 87 | 98.0 % / 99.5 % | 1 | **0** |
+| 2 % | 392 / 353 | 96.3 % / 98.0 % | 1 | **0** |
+| 5 % | 906 / 865 | 93.3 % / 95.2 % | 1 | **0** |
+| 10 % | 1 725 / 1 778 | 88.6 % / 90.1 % | 1 | **0** |
+| 20 % | 3 483 / 3 646 | 78.9 % / 79.7 % | 1 | **0** |
+
+**Not one reconnection at any rate, up to and including 20 % loss in both
+directions.** The connection holds because the budget is 16 RPIs and the losses
+are independent: sixteen in a row at p = 0.2 is about 7 × 10⁻¹², which does not
+happen in 18 000 frames. What degrades is the freshness of the process image —
+at 20 % loss a fifth of the scans read a held value — and that is a control
+question, not a connectivity one.
+
+### Outage duration is what breaks it, exactly at the budget
+
+A total outage, repeated every 5 s:
+
+| outage | ForwardOpen | **connection timeouts** | verdict |
+|---|---|---|---|
+| 100 ms | 1 | **0** | survives — inside the 160 ms budget |
+| 300 ms | 41 | **41** | drops on every single outage |
+| 1000 ms | 37 | **36** | drops on every single outage |
+
+The boundary sits where CIP says it should, with no ambiguity: below the budget
+nothing happens at all, above it the connection is lost every time and has to be
+rebuilt. 100 ms of total silence is invisible; 300 ms costs a ForwardOpen.
+
+**So the knob for link robustness is the timeout multiplier, not the RPI.** A
+plant whose network glitches for 300 ms needs `tmo_mult` raised — at a 10 ms
+RPI, 3 gives 320 ms and 4 gives 640 ms — and lowering the RPI makes it *worse*,
+because the budget is a multiple of the RPI.
+
+### The same loss at each RPI
+
+| RPI | budget | packets lost | ForwardOpen | connection timeouts |
+|---|---|---|---|---|
+| 5 ms | 80 ms | 932 / 1 803 | 2 | **1** |
+| 10 ms | 160 ms | 906 / 865 | 1 | **0** |
+| 50 ms | 800 ms | 183 / 147 | 1 | **0** |
+
+5 % loss costs a reconnection at a 5 ms RPI and none at 10 ms or 50 ms — the
+same ordering the idle measurements gave, for the same reason: the budget
+shrinks with the RPI while the host's stalls do not.
+
+(T→O delivers 46.6 % at the 5 ms RPI because `SOFTPLC_OPENER_TICK_MS` defaults
+to 10, so the Adapter serves 10 ms as §8.1 describes. That is the default
+behaviour under test, not a fault in the run.)
+
+### Not measured at the time — since closed
+
+**Delay, jitter and packet reordering could not be injected.** This kernel is
+built with `CONFIG_NET_SCH_NETEM` unset, so `tc qdisc add ... netem` fails with
+"Specified qdisc kind is unknown" however present the `tc` binary is; iptables
+has no equivalent. Ten conditions were run against netem and failed in a second
+each before this was diagnosed.
+
+That gap is closed in §16: since the kernel would not be the wire, the wire
+became a process. `tools/cip_impair.c` forwards frames between two namespaces
+and can hold one back, duplicate it, replay it or damage it on the way through.
+Reordering was the case worth reaching, and it found a defect.
+
+## 14. Acceptance findings: safe states
+
+Three questions asked from the plant's side rather than the code's, all three
+answered wrong before this, all three now fixed and covered by tests. See the
+commit "A stopped or idle peer must stop the outputs".
+
+| question | behaviour found | now |
+|---|---|---|
+| Controller in PROGRAM mode (CIP run/idle IDLE) | outputs kept being driven from data the controller had declared invalid | failsafe policy applied at once |
+| No controller connected at all | the adapter answered every scan with the empty assembly, and because the answer was prompt the staleness clock reset every scan, so **the failsafe could never fire** | exchange refused, failsafe applied |
+| PLC stopped cleanly | the adapter kept the connection up and produced the last output image indefinitely — measured at **493 identical frames over five seconds**, with the controller seeing a healthy connection | production stops 2.0 s after the PLC; the far end's timeout then fires |
+
+The third is the one that would have failed an acceptance test outright:
+stopping a PLC has to stop its outputs, and a frozen image on a connection the
+controller still trusts is the opposite of that.
+
+### HOLD and CLEAR across a real connection loss (A4)
+
+The suite checks both policies by killing the stack process. That covers the
+IPC boundary — the proxy stops getting answers and applies the policy — but
+not the case the plant actually sees: the peer alive and answering while the
+CIP connection underneath it is gone. `tools/e2e_cip_failsafe.sh` covers that
+one. Two soft PLCs in separate namespaces, Exclusive Owner established, then
+an iptables DROP on UDP 2222 only, held to the end of the run: I/O stops, TCP
+44818 stays up, both processes keep running.
+
+| policy | scans online | scans down | scans that disobeyed the policy |
+|---|---|---|---|
+| HOLD  | 514 | 284 | 0 — every down scan reproduced the last online image |
+| CLEAR | 515 | 284 | 0 — every down scan read all zero |
+
+The check is per scan, not per transition: holding for one scan and then
+drifting is still a wrong image in front of a POU.
+
+**What this found.** Leaving TCP up is what made the defect visible. The
+scanner reconnects over TCP, the ForwardOpen succeeds, and the code set the
+device `connected` at that moment — while no I/O was flowing and the device's
+receive buffer still held the *previous* connection's bytes. The result was
+**16 consecutive scans reporting `EIP_DEVICE_ONLINE` with stale data behind
+them**, 160 ms, exactly one `(4 << 2) × 10 ms` connection budget, repeating
+for every reconnect attempt for as long as the outage lasted. The header had
+always defined `EIP_DEVICE_ONLINE` as "connected, data fresh"; the
+implementation only checked that the ForwardOpen had been accepted.
+
+A device is now ONLINE only once a T→O frame has arrived on the *current*
+connection. Until then the per-device failsafe applies and the health byte
+reads FAILSAFE (or OFFLINE if that device has never delivered data). The
+scanner's `devices_online` count uses the same rule, so the DEGRADED signal
+and what a POU reads agree. Re-run against the unfixed build for comparison:
+
+| build | false-healthy scans during the outage |
+|---|---|
+| before | 16 |
+| after  | 0 |
+
+### A scan overrun loses cycles rather than running fast (A5)
+
+A POU that overruns its cycle re-bases the deadline instead of catching up, so
+the runtime loses cycles rather than firing a burst of back-to-back scans at
+faster than real time. `dt` carries the true elapsed time, so IEC timers stay
+correct in real time across the overrun. `tests/test_scan_overrun.c` pins it:
+a 2000 µs cycle with a POU sleeping 6000 µs, 100 scans — overruns counted,
+no catch-up burst, summed `dt` within 10 % of wall clock, and a `TON(200 ms)`
+still completing at 195–215 ms of accumulated `dt`.
+
+## 15. Acceptance findings: configuration errors and unclean recovery
+
+### A size mismatch is rejected on the wire, and was invisible above it
+
+Device table asking for a 64-byte image against an Adapter configured for 32:
+
+```
+[INFO]  Send request: service=0x54 epath=[classId=6 objectId=1]
+[ERROR] Message Router error=0x additional statuses [0x127][0x26]
+[WARNING] ForwardOpen to 10.10.0.1 rejected
+```
+
+CIP extended status **0x127** is "invalid O→T network connection size", which
+is exactly right - OpENer refuses the connection rather than truncating it, and
+the Scanner retries. Seven attempts, seven rejections, in twelve seconds.
+
+The PLC, meanwhile, reported `online`.
+
+Not a lie about the transport - the Scanner *process* was answering the core
+promptly on every scan - but a green light on a link that had never carried a
+byte. The per-device health bytes did say offline, as designed, so a POU
+written to read them would have known; nothing at the adapter level did.
+
+Fixed: zero devices connected is now a degraded adapter, with the count in the
+message.
+
+```
+WARN  eip-scanner 'scanner': answering, but 0 of 1 devices are connected -
+      check the device table against what the targets accept (a rejected
+      ForwardOpen looks like this)
+```
+
+and when it is working, the same line carries the proportion, so "3 of 4" is
+visible without reading the image:
+
+```
+INFO  eip-scanner 'scanner': online, 1 of 1 devices connected
+```
+
+This does not reopen what [ADR 0008](adr/0008-scanner-aggregates-devices.md)
+settled. The health bytes remain the only place that says *which* device is
+down; "none of them" is an aggregate fact and belongs to the aggregate.
+
+### SIGKILL of the core, and the restart after it
+
+A killed core runs no cleanup, so its shared memory and both semaphores are
+left in `/dev/shm` with the ring cursors frozen where they stopped. Measured,
+end to end, with the real stacks:
+
+| | observed |
+|---|---|
+| IPC objects after the kill | all four left behind, as expected |
+| Orphaned stack process | alive immediately; **exited within 5 s** |
+| Peer's view during the gap | `0 of 1 devices are connected` |
+| After restarting the core | attached and `online, 1 of 1 devices connected` |
+
+It recovers, and two of this session's fixes are what make it recover rather
+than merely restart:
+
+* The orphaned stack exits because of the core-timeout added for §14. Without
+  it that process would have held the CIP connection open indefinitely,
+  producing the dead PLC's last output image at full rate while a new core
+  started up beside it.
+* The gap is visible because of the aggregate-state change above. It would
+  otherwise have read as `online` throughout.
+
+The stale objects themselves are harmless: `plc_shm_create()` and
+`plc_sem_create()` unlink before creating, so the next core gets a clean region
+rather than inheriting a stranger's cursors and matching replies against
+sequence numbers it never sent. `test_stale_region_does_not_poison_the_next_run`
+pins that down, because it is a one-line precaution guarding a failure that
+would otherwise surface only as an inexplicable protocol error after a crash.
+
+What is **not** cleaned up is the objects themselves if no core ever restarts:
+one region and two semaphores per instance stay in `/dev/shm` until something
+recreates or removes them. Bounded, self-healing on restart, and not worth
+code - but worth knowing before blaming a disk-space alert on something else.
+
+## 16. Acceptance findings: a damaged wire
+
+netem is missing here, so `tools/cip_impair.c` stands in for it: an AF_PACKET
+forwarder in a middle namespace, damaging only CIP class 1 I/O (UDP 2222) and
+passing ARP and TCP 44818 intact. Everything below is measured through it at a
+10 ms RPI, one device, 32 bytes each way, with both PLCs reporting what reached
+their process images.
+
+Two things had to be right before any of it meant anything. The forwarder
+recomputes IP, UDP and TCP checksums, because a frame captured on the sending
+side may carry only a partial sum — offload finishes it later — and re-emitting
+it byte for byte gets it dropped silently by the receiver. And it takes the IP
+header's own length as authoritative rather than the frame length, because
+Ethernet pads anything under 60 bytes: deriving the length from the frame hands
+the padding to the receiver as payload, which corrupted the TCP session setup
+and looked exactly like the malformed-input failure the harness exists to find.
+
+**Baseline through the forwarder, nothing turned on:** ONLINE both directions,
+one ForwardOpen, no closes, `corrupt=0`. The wire is transparent.
+
+### Reordering: the process image stepped backwards (B1c)
+
+10 % of frames held back by 20 ms — two RPIs — in both directions:
+
+| | frames reordered | image went backwards | worst | connection |
+|---|---|---|---|---|
+| before | 195 (T→O) | **64** | 2 frames | survived |
+| after  | 195 (T→O) | **0** | — | survived |
+
+Same seed, same injection. A POU reading that image saw a value it had already
+passed, twice over — 20 ms of un-happening at a 10 ms cycle.
+
+**Cause.** `IOConnection::notifyReceiveData` parses the sequenced address
+item's count and hands it to the listener without ever comparing it. Upstream's
+own comment says as much: `// TODO: Check TypeIDs and sequence of the packages`.
+So every frame was delivered in arrival order, and arrival order is not send
+order on a real network. A device is now ONLINE only on a frame whose count is
+strictly newer than the one already in the image; the rest are dropped and
+counted in `out_of_order`, published in the scanner's status block so a network
+that reorders is visible rather than merely slightly wrong.
+
+**The other role was already correct.** OpENer compares with `SEQ_GT32` before
+passing consumed data to the assembly object, which is why the Adapter
+direction reads `back=0` in every run, before and after. The two stacks
+disagreed about a requirement the specification is explicit about, and only one
+of them was wrong.
+
+### Duplicates and replays (B3)
+
+10 % duplicated, 10 % replayed from eight frames back:
+
+| | injected (T→O) | image went backwards | worst |
+|---|---|---|---|
+| before | 291 dup + 310 replay | **230** | **9 frames** |
+| after  | 291 dup + 310 replay | **0** | — |
+
+Nine frames is 90 ms of stale data presented as current. The same sequence
+check covers both cases, because a duplicate and a replay are the same thing
+to a receiver: a count that does not advance.
+
+### Jitter (B1c)
+
+2 ms of delay with 8 ms of jitter on every frame — at a 10 ms RPI, enough for
+frames to overtake each other:
+
+| | image backwards | corrupt | connection |
+|---|---|---|---|
+| after the fix | 0 | 0 | ONLINE, 1 ForwardOpen, 0 closes |
+
+### Malformed datagrams: one packet killed the stack (B4)
+
+**This is the most severe finding in the acceptance set.**
+
+Truncated and bit-flipped I/O frames were injected, and the scanner stack
+process died with **SIGSEGV**. Reproduced deterministically afterwards with
+`tools/cip_fuzz.c`, which sends shaped malformed datagrams — an item count with
+no items behind it, an item claiming 0xFFFF bytes, a frame cut mid-header —
+from a third host on the same bridge:
+
+| build | scanner stack | adapter stack | the PLC core |
+|---|---|---|---|
+| before | **DEAD (SIGSEGV)** | alive | kept scanning, FAULTED, failsafe applied |
+| after  | alive, still serving | alive | ONLINE throughout |
+
+**Cause**, in `Buffer::operator>>(std::vector<uint8_t>&)`:
+
+```cpp
+std::copy(_buffer.begin() + _position,
+          _buffer.begin() + _position + val.size(), val.begin());
+```
+
+`val.size()` is the length field of a common packet item — a number taken
+straight off the wire. Nothing compares it to how many bytes actually arrived,
+and the `isValid()` test that would have caught it runs *after* the copy. Every
+scalar `operator>>` had the same shape, `_buffer[_position++]` with no bound.
+So an item claiming more than the datagram carries reads off the end of the
+heap.
+
+The I/O port is UDP on a plant network and CIP class 1 authenticates nothing,
+so the reachable precondition is "can send a UDP packet to the PLC". One
+datagram, one dead fieldbus stack, repeatable.
+
+Fixed in `patches/eipscanner-hardening.patch`: reads are bounded and mark the
+buffer invalid past the end, the length is checked before the copy rather than
+after, the receive handler drops a datagram that cannot hold what it claims,
+and the boundary our own C code calls across catches anything that still
+throws. `tools/e2e_cip_fuzz.sh` asserts both stacks survive 800 malformed
+datagrams and keep serving; it fails on the unpatched build.
+
+Worth stating plainly: **the process split did its job.** The core kept
+scanning in its own process, applied the failsafe, and was ONLINE again once
+the supervisor restarted the stack. A stack crash was always going to happen
+eventually; the architecture is what kept it from being a PLC crash.
+
+One result is not a defect and should not be read as one. A frame whose payload
+is corrupted *and* whose checksum is recomputed to match is delivered to the
+application: two such frames reached the image and were counted as `corrupt`.
+That models a forged or pre-checksum corruption, not a wire error — a wire
+error breaks the UDP checksum and never arrives. CIP class 1 carries no
+integrity or authenticity check of its own, so anything that can reach the port
+can write into the process image. That is a property of the protocol, and the
+answer to it is network segmentation, not a code change here.
+
+### Link down, cable-pull style (B2)
+
+Earlier outages dropped UDP 2222 with iptables, which leaves the TCP session
+established underneath: only the I/O stops. `ip link set <veth> down` takes the
+carrier, so the session dies too and recovery has to register a new session and
+issue a fresh ForwardOpen — a path nothing had previously executed.
+
+| policy | carrier loss → image shows it | carrier back → device online | policy violations while down |
+|---|---|---|---|
+| HOLD  | 162 ms | 159 ms | 0 over 601 scans |
+| CLEAR | 151 ms | 148 ms | 0 over 601 scans |
+
+Detection lands just under the `(4 << 2) × 10 ms` = 160 ms connection budget,
+which agrees with §13's blackout ladder finding that the boundary is the budget
+itself. The scanner logged the full sequence — `closed by timeout`, `session
+failed: No route to host`, `Unregistered session`, then `Registered session`
+and a ForwardOpen with a new serial number — and the image was live again
+afterwards, which is the part a health byte alone cannot show.
+
+### Two PLCs, one instance name (B5)
+
+A second core started on an instance name already in use took it over **without
+a word**: `plc_shm_create` unlinks before creating, so the incumbent kept
+scanning against a region nothing would answer, and which core the stack served
+came down to restart order.
+
+The unlink is deliberate — a crashed run must not wedge its own restart — so
+the fix is to tell the two apart. The creator now holds an advisory lock on the
+region for as long as it owns it. The kernel releases that lock however the
+owner exits, which is exactly the liveness question, with no pid to scan and no
+heartbeat to age out:
+
+```
+ERROR /softplc.dup.eip is already owned by a running process - another
+      instance with this name is live. Refusing to take it over.
+```
+
+The incumbent is untouched and the intruder exits non-zero.
+`tests/test_shm_ownership.c` pins both halves — a live owner is not evicted, a
+`SIGKILL`ed one leaves nothing behind — and fails on the old code.
+
+### Bandwidth saturation (B6)
+
+netem is absent but `tbf` and `htb` are not, so the link could be capped and
+then genuinely filled. 2 Mbit cap, competing UDP flood from a third host on the
+same bridge:
+
+| | through the cap | dropped | fresh images | connection |
+|---|---|---|---|---|
+| quiet | 59 kbit/s | 0 | 1854 / 1998 scans | ONLINE, 1 ForwardOpen |
+| saturated | **1294 kbit/s** | **3 799 926 pkt** | **533 / 1999 scans** | ONLINE, **2 ForwardOpens, 1 close** |
+
+Exclusive Owner survives a saturated link but not intact: the image refreshed
+on 27 % of scans instead of 93 %, and the connection dropped and re-established
+once. No corruption, no backwards steps. A PLC sharing a link with bulk traffic
+needs the traffic separated or prioritised; it will not simply degrade quietly.
+
+
+## 17. Acceptance findings: configuration integrity and operations
+
+### A device table pointing at instances the target does not have (C2)
+
+Three wrong instances, all refused on the wire and all visible above it:
+
+| device table | target's answer | what the PLC does |
+|---|---|---|
+| `o2t=199` | ForwardOpen rejected, ext `0x012F` | DEGRADED, 0 of 1 devices, failsafe held |
+| `t2o=199` | ForwardOpen rejected, ext `0x012F` | same |
+| `cfg=199` | ForwardOpen rejected, ext `0x0315` | same |
+
+No false green: the C1 fix already made "zero devices connected" a DEGRADED
+state rather than a healthy one, and that carries here.
+
+**What was missing was the reason.** The rejection reached the log as
+
+```
+[ERROR] Message Router error=0x additional statuses [0x12f]
+```
+
+— with the general status simply absent. `GeneralStatusCodes` is an enum over
+`CipUsint`, so streaming it inserts a *character*, and for every status that
+matters that character is unprintable. Worse, `forwardOpen()` returns an empty
+pointer and drops the response that carried the extended status, so nothing
+above the stack could tell a wrong assembly instance from a powered-down
+drive. Those are the two likeliest causes and they have nothing in common as
+remedies.
+
+Both are fixed in `patches/eipscanner-hardening.patch`, and the scanner now
+decodes the status against the device it belongs to:
+
+```
+WARN ForwardOpen to 10.10.0.1 rejected (cfg=151 o2t=199 t2o=100, 32B/32B,
+     rpi=10000us): the assembly instances requested cannot be used together
+```
+
+### Core and stack built at different ABIs (C3, D3)
+
+They are separate binaries in separate containers, so a rolling update runs
+them at different versions for a while. The shared region carries an ABI
+version and its own size for that window and both attach paths check them —
+but nothing had ever run the check, and an unexercised refusal is
+indistinguishable from no refusal until the day it matters.
+
+`tools/e2e_version_skew.sh` builds the stack a second time from a copy of the
+tree with the ABI constant bumped — a real second build, not a simulation —
+and runs it against the current core:
+
+| | result |
+|---|---|
+| the skewed stack | refused, exit 1: `/softplc.skew.eip: ABI 2/4480 bytes, expected 99/4480` |
+| the core it refused | still scanning, not ready, failsafe applied |
+| the matching stack, started after | attached; back ONLINE |
+
+The third row is what makes it a rolling-update test rather than a version
+check: the window closes cleanly. `tests/test_abi_skew.c` covers the same
+refusal in the suite — wrong version, wrong layout size, and wrong magic —
+by publishing a region by hand, so it needs no second build and runs in CI.
+
+### Health as a value, not as prose (D1)
+
+Everything the runtime knew about itself was in its log. A person could read
+it; an orchestrator could not, and neither could tell "connected" from
+"connected and receiving" without parsing sentences. `softplc --status` reads
+the published region read-only and prints one JSON object:
+
+```json
+{"instance":"plcB","role":"scanner","region":"/softplc.plcB.eipscan","ready":true,
+ "abi_version":3,"layout_bytes":4480,"state":"ONLINE","devices":{"online":1,"total":1},
+ "input_bytes":33,"output_bytes":32,"cycles":605,"forward_opens":1,
+ "connection_losses":0,"out_of_order":0,"last_error":0}
+```
+
+The exit status is the half a probe actually uses: **0** online and fully
+connected, **3** reachable but not ready, **4** nothing published under that
+name. The last distinction matters — a container cannot tell a slow start from
+a crash loop without it. It takes no locks and writes nothing, so it cannot
+perturb the control loop it measures.
+
+Adding it found a dead counter. `assembly_writes` — frames the controller has
+written into the consumed assembly, the difference between a connection that
+exists and one that is being used — was counted in the backend, exposed by an
+accessor, and read by nobody. The field in the status block had always been
+zero. It is published now: 599 writes over 8 seconds on a live link, 0 before
+the controller connects.
+
+### Running out of things (D2)
+
+| condition | before | after |
+|---|---|---|
+| `/dev/shm` full | **SIGBUS, "Bus error", no log line** | exit 1: `cannot reserve 4480 bytes ... No space left on device - /dev/shm is full or too small for this instance` |
+| no file descriptors | exit 1 | exit 1: `sem_open(...) create failed: Too many open files` |
+| `/dev/shm` read-only | exit 1 | exit 1: `shm_open(...) create failed: Read-only file system` |
+
+The first was a real defect and an easy one to meet: `ftruncate` on tmpfs sets
+a size without reserving pages, and `mmap` does not reserve them either, so on
+a full `/dev/shm` both succeed and the **first write** takes SIGBUS. A
+container with a small `--shm-size` is the ordinary way to arrive there, and
+what it got was a signal with no message. `posix_fallocate` after the truncate
+allocates immediately and reports `ENOSPC` as a return value, so running out
+of shared memory is a start-up error with a name on it.
+
+A half-started PLC is worse than one that does not start: the process image
+exists, something reads it, and nothing is writing to it. All three cases now
+fail at start-up, exit non-zero, and name the resource.
+`tools/e2e_resource_limits.sh` asserts exactly that.
+
+## 18. What could not be measured
+
+* **8–24 hour runs.** The longest completed run is 1 hour per RPI. The session
+  container is reclaimed on inactivity, so multi-hour runs could not be
+  guaranteed to complete. Slow degradation over a working shift is therefore
+  **untested**; the 1-hour runs show no drift, but one hour is not a shift.
+* **Real EtherNet/IP hardware.** Both roles were tested against each other. No
+  third-party scanner has driven this Adapter and no real device has been driven
+  by this Scanner.
+* **IPC totals for four conditions** (§7).
+* **Delay, jitter and reordering through the kernel.** `CONFIG_NET_SCH_NETEM`
+  is unset, so netem is unavailable. These were measured instead through a
+  userspace forwarder (§16), which is not the same thing: it reproduces the
+  ordering and timing a network imposes, but it is a process on the host and
+  cannot model a NIC or a switch. `tbf` and `htb` are present, so bandwidth
+  limiting is the kernel's own.
+* **Scheduling latency of the kernel itself** — no `perf`, and
+  `/proc/<pid>/schedstat` run-queue delay is the closest available proxy; it is
+  reported per second, not per event, so it cannot be attributed to an
+  individual late frame.

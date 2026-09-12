@@ -1,0 +1,455 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/**
+ * @file eip_scanner_backend_eipscanner.cpp
+ * @brief EtherNet/IP Scanner backend built on EIPScanner (nimbuscontrols).
+ *
+ * We are the **originator** here, which inverts the CIP direction labels
+ * against the adapter role:
+ *
+ *     PLC %Q  ->  O->T  (we send to each remote device)
+ *     PLC %I  <-  T->O  (each device sends to us)
+ *
+ * EIPScanner is single-threaded and caller-driven: `handleConnections()` runs
+ * a select and returns, spawning nothing. So the split here is simply that the
+ * service loop's stack thread owns every EIPScanner object and calls poll(),
+ * while the IPC thread only ever calls exchange_images(). The two meet at one
+ * mutex around a pair of byte vectors - the same narrow boundary the OpENer
+ * backend uses, for the same reason.
+ *
+ * Per-device failsafe is applied *here*, per device, under that device's own
+ * policy from the device table. The core's adapter-level failsafe is a coarser
+ * thing that only fires when this whole process stops answering.
+ */
+#include "softplc/plc_config.h"
+#include "softplc/plc_log.h"
+#include "eip_scanner_backend.h"
+#include "eip_scanner_shm_layout_public.h"
+
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "ConnectionManager.h"
+#include "SessionInfo.h"
+#include "cip/connectionManager/ConnectionParameters.h"
+#include "cip/connectionManager/NetworkConnectionParams.h"
+#include "utils/Logger.h"
+
+using eipScanner::ConnectionManager;
+using eipScanner::IOConnection;
+using eipScanner::SessionInfo;
+using eipScanner::cip::connectionManager::ConnectionParameters;
+using eipScanner::cip::connectionManager::NetworkConnectionParams;
+
+namespace {
+
+constexpr uint16_t kEipPort = 0xAF12;  /* 44818 */
+
+struct Device {
+    eip_scanner_device_t   cfg{};
+    std::shared_ptr<SessionInfo> session;
+    IOConnection::WPtr     io;
+    bool                   connected = false;
+    /** Has *this* connection delivered a T->O frame yet?
+     *
+     * ForwardOpen succeeding is not the same as data flowing: a reconnect
+     * whose UDP path is still broken establishes, then times out again one
+     * connection budget later. In that window ::latest still holds the
+     * previous connection's bytes, so reporting ONLINE on `connected` alone
+     * republishes stale data as fresh. */
+    bool                   has_data = false;
+    /** Has this device ever delivered data, on any connection? Separates
+     *  "lost what we had" from "never had anything". */
+    bool                   ever_data = false;
+    /** Last CIP sequence count accepted on the current connection.
+     *
+     * Upstream parses the sequenced address item's count and hands it to the
+     * listener without ever comparing it, so a frame that arrives late is
+     * delivered like any other and overwrites newer data. Measured on a wire
+     * reordering 10 % of frames by two RPIs: the image stepped backwards 64
+     * times in 19 seconds, which a POU reads as a value that un-happened.
+     * The count is a CipUint, so the comparison has to wrap at 16 bits. */
+    uint16_t               last_seq = 0;
+    bool                   have_seq = false;
+    /** Last image received while connected; what HOLD reproduces. */
+    std::vector<uint8_t>   last_good;
+    /** Latest received image, published to the IPC thread under g_lock. */
+    std::vector<uint8_t>   latest;
+    std::vector<uint8_t>   to_send;
+    /** Retry gate: a powered-down drive must not be reconnected every poll. */
+    std::chrono::steady_clock::time_point next_retry{};
+};
+
+std::mutex             g_lock;      /* guards Device::latest / ::to_send      */
+eip_scanner_config_t   g_cfg{};
+std::vector<Device>    g_devices;
+std::unique_ptr<ConnectionManager> g_cm;
+uint64_t               g_forward_opens = 0;
+uint64_t               g_losses        = 0;
+uint64_t               g_out_of_order  = 0;
+uint64_t               g_rejects       = 0;
+
+constexpr auto kReconnectInterval = std::chrono::seconds(2);
+
+/** Build the Class 1 connection parameters for one device. */
+ConnectionParameters make_params(const eip_scanner_device_t &d) {
+    ConnectionParameters p;
+    /* Connection path: 0x20 0x04 = Assembly class, then config / O2T / T2O
+     * instances as 8-bit segments (0x24) with 0x2C separators - the encoding
+     * upstream's own example uses. */
+    p.connectionPath = {0x20, 0x04,
+                        0x24, static_cast<uint8_t>(d.config_assembly),
+                        0x2C, static_cast<uint8_t>(d.o2t_assembly),
+                        0x2C, static_cast<uint8_t>(d.t2o_assembly)};
+    p.o2tRealTimeFormat = true;
+    p.originatorVendorId = 1;
+    p.originatorSerialNumber = 0x534F4654;  /* "SOFT" */
+
+    p.o2tNetworkConnectionParams |= NetworkConnectionParams::P2P;
+    p.o2tNetworkConnectionParams |= NetworkConnectionParams::SCHEDULED_PRIORITY;
+    p.o2tNetworkConnectionParams |= d.o2t_bytes;
+
+    p.t2oNetworkConnectionParams |= NetworkConnectionParams::P2P;
+    p.t2oNetworkConnectionParams |= NetworkConnectionParams::SCHEDULED_PRIORITY;
+    p.t2oNetworkConnectionParams |= d.t2o_bytes;
+
+    p.o2tRPI = d.o2t_rpi_us;
+    p.t2oRPI = d.t2o_rpi_us;
+    /* Was left at 0 - CIP's minimum, (4 << 0) = 4x RPI. Measured at RPI 2 ms
+     * that 8 ms budget reopened the connection 14 times in 12 seconds on this
+     * host. Per device, because how much scheduling slack a link needs is a
+     * property of the host, not of the protocol. */
+    p.connectionTimeoutMultiplier = d.timeout_multiplier;
+    p.transportTypeTrigger |= NetworkConnectionParams::CLASS1;
+    return p;
+}
+
+/**
+ * What a rejected ForwardOpen was actually complaining about.
+ *
+ * The extended status is the difference between "your device table is wrong"
+ * and "the drive is powered down", and those have nothing in common as
+ * remedies. Only the codes a misconfigured device table can produce are named
+ * here; anything else is reported as its number, which is still enough to look
+ * up. Values are from CIP Vol.1 and match OpENer's own enum.
+ */
+static const char *forward_open_reason(uint16_t extended) {
+    switch (extended) {
+    case 0x0100: return "connection already in use, or a duplicate ForwardOpen";
+    case 0x0103: return "transport class or trigger combination not supported";
+    case 0x0106: return "ownership conflict - another scanner owns this connection";
+    case 0x0107: return "target connection not found";
+    case 0x0108: return "invalid network connection parameter";
+    case 0x0109: return "invalid connection size";
+    case 0x0110: return "target for the connection is not configured";
+    case 0x0111: return "RPI not supported";
+    case 0x0112: return "RPI outside the range the target accepts";
+    case 0x0113: return "no connection slots left on the target";
+    case 0x0114: return "vendor id or product code in the key does not match";
+    case 0x0115: return "device type in the key does not match";
+    case 0x0116: return "revision in the key does not match";
+    case 0x0119: return "non-listen-only connection not opened";
+    case 0x011A: return "target object is out of connections";
+    case 0x0126: return "configuration assembly is the wrong size";
+    case 0x0127: return "O->T size does not match the target's consuming assembly";
+    case 0x0128: return "T->O size does not match the target's producing assembly";
+    case 0x0129: return "configuration assembly instance does not exist on the target";
+    case 0x012A: return "consumed (O->T) assembly instance does not exist on the target";
+    case 0x012B: return "produced (T->O) assembly instance does not exist on the target";
+    case 0x012F: return "the assembly instances requested cannot be used together";
+    case 0x0311: return "port not available on the target";
+    case 0x0312: return "link address not valid";
+    case 0x0315: return "invalid segment in the connection path - the target "
+                        "does not recognise an assembly instance in it";
+    case 0x0316: return "the connection path and the connection to close "
+                        "do not match";
+    case 0x0317: return "scheduling priority not specified";
+    case 0x0318: return "link address to self is not valid";
+    default:     return NULL;
+    }
+}
+
+/** Open (or reopen) one device's connection.  Failure is not fatal: a scanner
+ *  whose third drive is powered down must still run the other three. */
+void connect_device(size_t index) {
+    Device &dev = g_devices[index];
+    const auto now = std::chrono::steady_clock::now();
+    if (now < dev.next_retry) return;
+    dev.next_retry = now + kReconnectInterval;
+
+    try {
+        dev.session = std::make_shared<SessionInfo>(dev.cfg.address, kEipPort);
+    } catch (const std::exception &e) {
+        eipScanner::utils::Logger(eipScanner::utils::LogLevel::WARNING)
+            << "session to " << dev.cfg.address << " failed: " << e.what();
+        dev.session.reset();
+        return;
+    }
+
+    auto io = g_cm->forwardOpen(dev.session, make_params(dev.cfg));
+    auto ptr = io.lock();
+    if (!ptr) {
+        /* Name the device, the instances asked for, and what the target said
+         * about them. "0 of 1 devices connected" is true and useless; this is
+         * the line someone can act on without a packet capture. */
+        const uint16_t ext = g_cm->getLastForwardOpenExtendedStatus();
+        const char *why = forward_open_reason(ext);
+        char detail[192];
+        if (why) {
+            snprintf(detail, sizeof(detail), "%s", why);
+        } else {
+            snprintf(detail, sizeof(detail), "extended status 0x%04X", ext);
+        }
+        PLC_LOG_WARN("ForwardOpen to %s rejected (cfg=%u o2t=%u t2o=%u, "
+                     "%uB/%uB, rpi=%uus): %s",
+                     dev.cfg.address, dev.cfg.config_assembly,
+                     dev.cfg.o2t_assembly, dev.cfg.t2o_assembly,
+                     dev.cfg.o2t_bytes, dev.cfg.t2o_bytes, dev.cfg.o2t_rpi_us,
+                     detail);
+        g_rejects++;
+        dev.session.reset();
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(g_lock);
+        ptr->setDataToSend(dev.to_send);
+        /* A new connection starts with nothing received on it, whatever the
+         * last one left in ::latest - and with a sequence count that begins
+         * again at 1, so the previous connection's is not a baseline. */
+        dev.has_data = false;
+        dev.have_seq = false;
+    }
+
+    ptr->setReceiveDataListener(
+        [index](auto /*realTimeHeader*/, auto sequence,
+                const std::vector<uint8_t> &data) {
+            /* Runs on the stack thread inside handleConnections(). */
+            Device &d = g_devices[index];
+            std::lock_guard<std::mutex> lk(g_lock);
+
+            /* Out of order, or the same frame twice: drop it. Only a frame
+             * strictly newer than what is already in the image may replace
+             * it - the reason CIP carries the count at all. */
+            if (d.have_seq &&
+                (int16_t)((uint16_t)sequence - d.last_seq) <= 0) {
+                g_out_of_order++;
+                return;
+            }
+            d.last_seq = (uint16_t)sequence;
+            d.have_seq = true;
+
+            const size_t n = std::min<size_t>(data.size(), d.latest.size());
+            if (n) std::memcpy(d.latest.data(), data.data(), n);
+            if (n < d.latest.size()) {
+                std::memset(d.latest.data() + n, 0, d.latest.size() - n);
+            }
+            d.last_good = d.latest;
+            d.has_data  = true;
+            d.ever_data = true;
+        });
+
+    ptr->setCloseListener([index]() {
+        Device &d = g_devices[index];
+        d.connected = false;
+        d.next_retry = std::chrono::steady_clock::now() + kReconnectInterval;
+        g_losses++;
+        eipScanner::utils::Logger(eipScanner::utils::LogLevel::WARNING)
+            << "connection to " << d.cfg.address << " closed";
+    });
+
+    dev.io = io;
+    dev.connected = true;
+    g_forward_opens++;
+    eipScanner::utils::Logger(eipScanner::utils::LogLevel::INFO)
+        << "connected to " << dev.cfg.address
+        << " o2t=" << dev.cfg.o2t_bytes << "B t2o=" << dev.cfg.t2o_bytes << "B";
+}
+
+/* --- backend interface --------------------------------------------------- */
+
+plc_status_t scanner_init(const eip_scanner_config_t *cfg) {
+    if (!cfg || cfg->device_count == 0) return PLC_ERR_INVAL;
+    g_cfg = *cfg;
+
+    /* The stack's own log level, separate from ours: diagnosing a connection
+     * that will not establish needs its ForwardOpen and connection-lifecycle
+     * lines, and hard-coding WARNING makes that impossible in the field. */
+    {
+        eipScanner::utils::LogLevel lvl = eipScanner::utils::LogLevel::WARNING;
+        if (const char *v = plc_cfg_str("SOFTPLC_SCANNER_STACK_LOG", nullptr)) {
+            if      (std::strcmp(v, "debug") == 0) lvl = eipScanner::utils::LogLevel::DEBUG;
+            else if (std::strcmp(v, "info")  == 0) lvl = eipScanner::utils::LogLevel::INFO;
+            else if (std::strcmp(v, "error") == 0) lvl = eipScanner::utils::LogLevel::ERROR;
+        }
+        eipScanner::utils::Logger::setLogLevel(lvl);
+    }
+
+    g_cm = std::make_unique<ConnectionManager>();
+    g_devices.clear();
+    g_devices.resize(cfg->device_count);
+
+    for (uint32_t i = 0; i < cfg->device_count; ++i) {
+        Device &d = g_devices[i];
+        d.cfg = cfg->devices[i];
+        d.latest.assign(d.cfg.t2o_bytes, 0);
+        d.last_good.assign(d.cfg.t2o_bytes, 0);
+        d.to_send.assign(d.cfg.o2t_bytes, 0);
+        connect_device(i);
+    }
+
+    /* Deliberately PLC_OK even if every ForwardOpen failed. The devices may
+     * simply not be powered yet, and poll() keeps retrying; failing here would
+     * take the process down and hand the core a dead peer instead of a live
+     * one reporting every device offline. */
+    return PLC_OK;
+}
+
+void scanner_shutdown() {
+    if (g_cm) {
+        for (auto &d : g_devices) {
+            if (auto ptr = d.io.lock()) g_cm->forwardClose(d.session, d.io);
+        }
+        g_cm.reset();
+    }
+    g_devices.clear();
+}
+
+void scanner_poll(uint32_t budget_us) {
+    if (!g_cm) return;
+
+    /* Push the freshest outputs into each live connection before servicing. */
+    {
+        std::lock_guard<std::mutex> lk(g_lock);
+        for (auto &d : g_devices) {
+            if (!d.connected) continue;
+            if (auto ptr = d.io.lock()) ptr->setDataToSend(d.to_send);
+            else d.connected = false;
+        }
+    }
+
+    /* Only service when something is actually open.
+     *
+     * Two reasons, and the first is not optional. Upstream's
+     * BaseSocket::select() begins with *std::max_element(sockets...) and
+     * dereferences it unconditionally, so calling handleConnections() with an
+     * empty socket list is undefined behaviour - which is exactly the state
+     * this process is in whenever every device is unreachable.
+     *
+     * Second, it would spin. With nothing to select on there is no sleep in
+     * the loop, so this thread would take and release the mutex the IPC thread
+     * needs at full speed, burn a core, and on a small host starve exchanges
+     * past their budget. A scanner whose devices are all down must idle, not
+     * spin. */
+    /* This function is called from C. An exception that escapes it does not
+     * unwind - it terminates the process, and upstream throws on malformed
+     * input by design. The handler inside the socket call-back catches what
+     * it can see; this is the boundary that has to hold whatever it misses. */
+    try {
+        if (g_cm->hasOpenConnections()) {
+            g_cm->handleConnections(std::chrono::milliseconds(budget_us / 1000 + 1));
+        } else {
+            std::this_thread::sleep_for(std::chrono::microseconds(budget_us));
+        }
+    } catch (const std::exception &e) {
+        eipScanner::utils::Logger(eipScanner::utils::LogLevel::ERROR)
+            << "stack threw while servicing connections: " << e.what();
+    } catch (...) {
+        eipScanner::utils::Logger(eipScanner::utils::LogLevel::ERROR)
+            << "stack threw a non-standard exception while servicing connections";
+    }
+
+    for (size_t i = 0; i < g_devices.size(); ++i) {
+        if (!g_devices[i].connected) {
+            try {
+                connect_device(i);
+            } catch (const std::exception &e) {
+                eipScanner::utils::Logger(eipScanner::utils::LogLevel::ERROR)
+                    << "connect to " << g_devices[i].cfg.address
+                    << " threw: " << e.what();
+            }
+        }
+    }
+}
+
+size_t scanner_exchange(const uint8_t *o2t, size_t o2t_len,
+                        uint8_t *health, size_t health_len,
+                        uint8_t *t2o, size_t t2o_cap) {
+    std::lock_guard<std::mutex> lk(g_lock);
+
+    const size_t total = std::min<size_t>(g_cfg.total_t2o_bytes, t2o_cap);
+
+    for (size_t i = 0; i < g_devices.size(); ++i) {
+        Device &d = g_devices[i];
+        const eip_scanner_device_t &c = d.cfg;
+
+        /* Stage this device's outputs; poll() hands them to the connection. */
+        if (o2t && c.o2t_offset + c.o2t_bytes <= o2t_len) {
+            std::memcpy(d.to_send.data(), o2t + c.o2t_offset, c.o2t_bytes);
+        }
+
+        if (c.t2o_offset + c.t2o_bytes > total) continue;
+        uint8_t *slice = t2o + c.t2o_offset;
+
+        if (d.connected && d.has_data) {
+            std::memcpy(slice, d.latest.data(), c.t2o_bytes);
+            if (i < health_len) health[i] = EIP_DEVICE_ONLINE;
+        } else {
+            /* Per-device failsafe under this device's own policy. The rest of
+             * the image is untouched: one drive dropping must not disturb
+             * three healthy ones. */
+            if (c.failsafe_policy == PLC_FAILSAFE_CLEAR) {
+                std::memset(slice, 0, c.t2o_bytes);
+            } else {
+                std::memcpy(slice, d.last_good.data(), c.t2o_bytes);
+            }
+            /* Per device, not per process: "lost what we had" only applies
+             * to a device that once had it. A connection that is open but
+             * has not delivered anything yet reads OFFLINE - there is no
+             * fresh data behind it either way. */
+            if (i < health_len) {
+                health[i] = d.ever_data ? EIP_DEVICE_FAILSAFE
+                                        : EIP_DEVICE_OFFLINE;
+            }
+        }
+    }
+    return total;
+}
+
+uint32_t scanner_online() {
+    /* Same rule as the health byte: a connection with no data behind it is
+     * not an online device, so the proxy's DEGRADED signal agrees with what
+     * a POU reads. */
+    std::lock_guard<std::mutex> lk(g_lock);
+    uint32_t n = 0;
+    for (const auto &d : g_devices) if (d.connected && d.has_data) n++;
+    return n;
+}
+
+uint64_t scanner_forward_opens() { return g_forward_opens; }
+uint64_t scanner_losses()        { return g_losses; }
+uint64_t scanner_out_of_order()  { return g_out_of_order; }
+
+const eip_scanner_backend_t kEipScanner = {
+    "eipscanner",
+    scanner_init,
+    scanner_shutdown,
+    scanner_poll,
+    scanner_exchange,
+    scanner_online,
+    scanner_forward_opens,
+    scanner_losses,
+    scanner_out_of_order,
+};
+
+}  // namespace
+
+extern "C" const eip_scanner_backend_t *eip_scanner_backend_get(void) {
+    return &kEipScanner;
+}

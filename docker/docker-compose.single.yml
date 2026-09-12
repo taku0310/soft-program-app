@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# One container: the PLC core and one EtherNet/IP role, switched by config.
+#
+# Use this when the PLC is either a device on someone else's network or an
+# originator driving remote I/O - not both.  For both roles at once use
+# docker-compose.yml beside this file: CIP class 1 I/O uses UDP 2222 at both
+# ends, a container is one network namespace, and the two roles in one
+# namespace receive each other's traffic.
+#
+# The core and the stack are still two processes, meeting only at the shared
+# memory the core owns.  A stack crash costs a failsafe transition, not the
+# PLC, exactly as in the split deployment - see docs/adr/0010.  Restarting the
+# stack is the entrypoint's job here, and it does not take the core down to do
+# it.
+#
+#     docker compose -f docker/docker-compose.single.yml up --build
+#
+# Switching role: edit `role` in examples/config/softplc.conf, or override it
+# per-run without touching the file - `SOFTPLC_ROLE=scanner docker compose ...`
+# - since the environment wins over the file.
+
+name: softplc-single
+
+services:
+  softplc:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.softplc
+    volumes:
+      - ../examples/config/softplc.conf:/etc/softplc/softplc.conf:ro
+      # Read by the scanner process and by the core, which needs the image
+      # sizes to size its own bindings.  Harmless in the adapter role.
+      - ../examples/config/scanner-devices.conf:/etc/softplc/scanner-devices.conf:ro
+    environment:
+      # Everything else comes from the mounted file.  Anything set here wins
+      # over it, which is what makes a per-environment override possible
+      # without a second copy of the file.
+      SOFTPLC_ROLE: ${SOFTPLC_ROLE:-adapter}
+    ports:
+      # role = adapter only.  A Scanner opens outbound connections and listens
+      # on nothing, so with role=scanner these publish a port nothing binds -
+      # harmless, but they can be deleted for that deployment.
+      - "44818:44818/tcp"
+      - "44818:44818/udp"
+      - "2222:2222/udp"
+    # The container is the failure domain now, so this restarts both processes
+    # together.  It is the outer half of the recovery story; the entrypoint
+    # handles the inner half, a stack crash, without the core noticing.
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      # No capabilities in either role, which the split deployment cannot
+      # manage: there the stack container runs as root against shared memory
+      # the core created 0600 as uid 10001, so it needs CAP_DAC_OVERRIDE back.
+      # One container means one uid and that problem does not arise.  OpENer
+      # itself needs nothing privileged - it reads the interface MAC by ioctl
+      # and binds 44818 and 2222, all of which are above 1024.
+      - ALL

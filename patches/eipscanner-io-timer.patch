@@ -1,0 +1,47 @@
+Fix two ways IOConnection's send timer loses real time.
+
+Found by timing class 1 traffic at the interface rather than trusting the
+stack's own view of what it sent - see docs/eip-rpi-evaluation.md.
+
+1. notifyTick() truncated elapsed time to whole milliseconds and then set
+   _lastHandleTime from the untruncated clock, so the sub-millisecond
+   remainder was discarded permanently rather than carried forward. That value
+   drives the connection timeout accounting as well as the send timer, so the
+   configured (4 << multiplier) x RPI was not the timeout in effect.
+
+2. On sending, _o2tTimer was zeroed rather than decremented by the period.
+   The tick that crosses the deadline almost never lands exactly on it, so
+   zeroing discards the overshoot and the mean period becomes _o2tAPI plus the
+   mean overshoot. This was the dominant error: at a 10 ms RPI the measured
+   O->T period was 11982 us; fixing only (1) left it at 12042 us; fixing (2)
+   brought it to 10002 us, delivering 99.98% of the expected frames.
+
+diff --git a/src/IOConnection.cpp b/src/IOConnection.cpp
+index 5571496..065a39a 100644
+--- a/src/IOConnection.cpp
++++ b/src/IOConnection.cpp
+@@ -94,9 +94,9 @@ namespace eipScanner {
+ 	bool IOConnection::notifyTick() {
+ 		auto now = std::chrono::steady_clock::now();
+ 		auto sinceLastHandle =
+-			std::chrono::duration_cast<std::chrono::milliseconds>(now - _lastHandleTime);
++			std::chrono::duration_cast<std::chrono::microseconds>(now - _lastHandleTime);
+ 
+-		auto periodInMicroS = sinceLastHandle.count() * 1000;
++		auto periodInMicroS = sinceLastHandle.count();
+ 		_connectionTimeoutCount += periodInMicroS;
+ 		if (_connectionTimeoutCount > _connectionTimeoutMultiplier * _t2oAPI) {
+ 			Logger(LogLevel::WARNING) << "Connection SeriaNumber=" << _serialNumber << " is closed by timeout";
+@@ -124,7 +124,11 @@ namespace eipScanner {
+ 				buffer << header;
+ 			}
+ 
+-			_o2tTimer = 0;
++			/* Subtract the period rather than zeroing: the tick that crosses the
++			 * deadline almost never lands exactly on it, and discarding the
++			 * overshoot restarts the next period early of where it should, so
++			 * the mean period becomes _o2tAPI plus the mean overshoot. */
++			_o2tTimer -= _o2tAPI;
+ 			_sendDataHandle(_outputData);
+ 			if (_o2tFixedSize && _outputData.size() != _o2tDataSize)  {
+ 				Logger(LogLevel::WARNING) << "Connection O2T_ID=" << _o2tNetworkConnectionId
